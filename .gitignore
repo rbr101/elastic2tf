@@ -1,0 +1,12 @@
+__pycache__/
+*.pyc
+# Terraform
+.terraform/
+*.tfstate
+*.tfstate.*
+*.auto.tfvars
+*.tfvars
+# Dev Tools exports kunnen gevoelige data bevatten
+export*.txt
+*.ndjson
+elastic2tf.ini
