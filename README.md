@@ -389,7 +389,8 @@ Met `-o` komt alles in één bestand, met een scheidingsregel per onderdeel. Het
 `saved_objects.ndjson`-bestand wordt dan naast dat bestand gezet. Zonder `-o` en `--output-dir`
 gaat alles naar stdout en worden saved objects als heredoc ingesloten.
 
-Elk bestand begint met `# Gegenereerd door devtools2tf.py vX.Y.Z`. Pas de bestanden niet met de
+Elk bestand begint met `# Gegenereerd door <scriptnaam> vX.Y.Z`, met de naam waaronder het script
+is uitgevoerd (ook als je het hebt hernoemd). Pas de bestanden niet met de
 hand aan, maar genereer ze opnieuw.
 
 Op stderr verschijnt een samenvatting: aantal gemaakte en overgeslagen resources per type, en
@@ -508,7 +509,7 @@ verwijderd.
 ```
 
 De versie staat ook bovenaan elk gegenereerd `.tf`-bestand
-(`# Gegenereerd door devtools2tf.py vX.Y.Z`) en in de samenvatting op stderr,
+(`# Gegenereerd door <scriptnaam> vX.Y.Z`) en in de samenvatting op stderr,
 zodat je altijd ziet met welke versie output gemaakt is.
 
 Versioning volgt [Semantic Versioning](https://semver.org/):

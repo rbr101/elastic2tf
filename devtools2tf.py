@@ -68,7 +68,7 @@ Voorbeelden
   ./devtools2tf.py --list-types
 """
 
-__version__ = "0.3.0"
+__version__ = "0.3.1"
 
 import argparse
 import fnmatch
@@ -77,6 +77,9 @@ import os
 import re
 import sys
 from collections import defaultdict
+
+# naam van het script zoals het wordt uitgevoerd (ook na hernoemen of via een symlink)
+SCRIPT_NAME = os.path.basename(sys.argv[0]) if sys.argv and sys.argv[0] not in ("", "-c") else "devtools2tf.py"
 
 # =========================================================================== HCL helpers
 
@@ -1742,7 +1745,7 @@ def main():
                 CONVERTERS[t][0](doc, ctx, space)
 
     # ---- output samenstellen
-    header = f"# Gegenereerd door devtools2tf.py v{__version__} — niet handmatig aanpassen, opnieuw genereren.\n"
+    header = f"# Gegenereerd door {SCRIPT_NAME} v{__version__} — niet handmatig aanpassen, opnieuw genereren.\n"
     files = {}
     for fname, blocks in ctx.blocks.items():
         files[fname] = header + "\n" + resolve_connector_refs(ctx, "\n".join(blocks))
@@ -1782,7 +1785,7 @@ def main():
             written = "stdout"
 
     # ---- samenvatting
-    print(f"\ndevtools2tf.py v{__version__} — geschreven naar {written}:", file=sys.stderr)
+    print(f"\n{SCRIPT_NAME} v{__version__} — geschreven naar {written}:", file=sys.stderr)
     for t in ORDER + ["datastream_data_view"]:
         made, skipped = ctx.stats.get(t, [0, 0])
         if made or skipped:

@@ -4,6 +4,12 @@ Alle noemenswaardige wijzigingen in dit project. Formaat volgens
 [Keep a Changelog](https://keepachangelog.com/nl/1.1.0/), versies volgens
 [Semantic Versioning](https://semver.org/).
 
+## [0.3.1] - 2026-11-16
+
+### Gewijzigd
+- De header van gegenereerde bestanden en de samenvatting tonen de naam waaronder het script is
+  uitgevoerd, in plaats van altijd `devtools2tf.py`.
+
 ## [0.3.0] - 2026-11-16
 
 Eerste publieke versie.
@@ -29,4 +35,5 @@ Eerste publieke versie.
   samenvatting.
 - Documentatie van het script in de README.
 
+[0.3.1]: https://github.com/rbr101/elastic2tf/releases/tag/v0.3.1
 [0.3.0]: https://github.com/rbr101/elastic2tf/releases/tag/v0.3.0
