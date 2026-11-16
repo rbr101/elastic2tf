@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 """
-devtools2tf.py — zet Kibana Dev Tools (Console) output om naar Terraform-code
-voor de elastic/elasticstack provider. Het type output wordt automatisch herkend.
+elastic2tf.py — zet Elasticsearch/Kibana-configuratie (Dev Tools-output of direct via de API)
+om naar Terraform-code voor de elastic/elasticstack provider. Het type output wordt automatisch
+herkend. Per resource-type komt er één resource met for_each over een locals-map
+(--no-for-each: elk object als los block).
 
 SNELSTART
 ---------
@@ -9,11 +11,11 @@ SNELSTART
    ze allemaal en voer ze in één keer uit.
 2. Kopieer de VOLLEDIGE response-output (inclusief de "# GET ... 200 OK"-regels)
    naar een bestand, bijv. export.txt. Losse JSON-bestanden per call kan ook.
-3. ./devtools2tf.py -i export.txt --output-dir terraform/
+3. ./elastic2tf.py -i export.txt --output-dir terraform/
 
 Of direct via de API (geen kopiëren nodig):
    cp elastic2tf.example.ini elastic2tf.ini    # url + username invullen
-   ./devtools2tf.py --fetch --output-dir terraform/
+   ./elastic2tf.py --fetch --output-dir terraform/
    Het wachtwoord wordt in de terminal gevraagd (niet zichtbaar, niet opgeslagen).
 
 ONDERSTEUNDE DEV TOOLS CALLS
@@ -58,17 +60,17 @@ Gedrag
     (--with-imports), Kibana-resources hebben die niet nodig.
 
 Voorbeelden
-  ./devtools2tf.py -i export.txt --output-dir tf/
-  ./devtools2tf.py -i rules.json -i connectors.json -o alerting.tf
-  ./devtools2tf.py -i ilm:policies.json            # type forceren (type:pad)
-  ./devtools2tf.py --fetch --output-dir tf/ --save-export export.txt
-  ./devtools2tf.py --fetch ilm index_template -o es.tf
-  ./devtools2tf.py --fetch elasticstack_kibana_alerting_rule elasticstack_kibana_action_connector -o alerting.tf
-  ./devtools2tf.py --fetch "GET _ilm/policy/mijn-policy" "GET kbn:/s/ops/api/actions/connectors" -o x.tf
-  ./devtools2tf.py --list-types
+  ./elastic2tf.py -i export.txt --output-dir tf/
+  ./elastic2tf.py -i rules.json -i connectors.json -o alerting.tf
+  ./elastic2tf.py -i ilm:policies.json            # type forceren (type:pad)
+  ./elastic2tf.py --fetch --output-dir tf/ --save-export export.txt
+  ./elastic2tf.py --fetch ilm index_template -o es.tf
+  ./elastic2tf.py --fetch elasticstack_kibana_alerting_rule elasticstack_kibana_action_connector -o alerting.tf
+  ./elastic2tf.py --fetch "GET _ilm/policy/mijn-policy" "GET kbn:/s/ops/api/actions/connectors" -o x.tf
+  ./elastic2tf.py --list-types
 """
 
-__version__ = "0.3.1"
+__version__ = "0.4.0"
 
 import argparse
 import fnmatch
@@ -79,7 +81,7 @@ import sys
 from collections import defaultdict
 
 # naam van het script zoals het wordt uitgevoerd (ook na hernoemen of via een symlink)
-SCRIPT_NAME = os.path.basename(sys.argv[0]) if sys.argv and sys.argv[0] not in ("", "-c") else "devtools2tf.py"
+SCRIPT_NAME = os.path.basename(sys.argv[0]) if sys.argv and sys.argv[0] not in ("", "-c") else "elastic2tf.py"
 
 # =========================================================================== HCL helpers
 
@@ -95,9 +97,15 @@ def hcl_key(key: str) -> str:
     return key if IDENT_RE.match(key) and key not in HCL_KEYWORDS else hcl_str(key)
 
 
+class Raw(str):
+    """Een kant-en-klare HCL-expressie (bijv. var.x of file(...)); wordt letterlijk overgenomen."""
+
+
 def hcl_value(v, indent: int = 0) -> str:
     """JSON-waarde als leesbare HCL-expressie (voor jsonencode() en lijsten)."""
     pad, pad_in = "  " * indent, "  " * (indent + 1)
+    if isinstance(v, Raw):
+        return str(v)
     if v is None:
         return "null"
     if isinstance(v, bool):
@@ -142,28 +150,39 @@ class Block:
 
     def __init__(self, header: str, indent: int = 0):
         self.header, self.indent, self.items = header, indent, []
+        self.key = None  # sleutel in de for_each-map (anders: name-attribuut of resourcenaam)
 
     def attr(self, key, value, *, raw=False, skip_none=True):
         if value is None and skip_none:
             return self
-        if not raw:
-            value = hcl_value(value, self.indent + 1)
-        self.items.append(("attr", key, value))
+        meta = ("raw", Raw(value)) if raw else ("val", value)
+        rendered = value if raw else hcl_value(value, self.indent + 1)
+        self.items.append(("attr", key, rendered, meta))
         return self
 
     def json(self, key, value, *, skip_empty=True):
         if value is None or (skip_empty and value in ({}, [])):
             return self
-        self.items.append(("attr", key, jsonenc(value, self.indent + 1)))
+        self.items.append(("attr", key, jsonenc(value, self.indent + 1), ("json", value)))
+        return self
+
+    def jsonlist(self, key, values, *, skip_empty=False):
+        """Lijst van objecten die elk met jsonencode() een string worden (bijv. processors)."""
+        if values is None or (skip_empty and not values):
+            return self
+        pad = "  " * (self.indent + 2)
+        rendered = ("[\n" + "\n".join(f"{pad}{jsonenc(x, self.indent + 2)}," for x in values)
+                    + "\n" + "  " * (self.indent + 1) + "]") if values else "[]"
+        self.items.append(("attr", key, rendered, ("jsonlist", list(values))))
         return self
 
     def block(self, header: str) -> "Block":
         b = Block(header, self.indent + 1)
-        self.items.append(("block", b, None))
+        self.items.append(("block", b, None, None))
         return b
 
     def blank(self):
-        self.items.append(("blank", None, None))
+        self.items.append(("blank", None, None, None))
         return self
 
     def render(self) -> str:
@@ -179,7 +198,7 @@ class Block:
                     out.append(f"{pad_in}{k.ljust(w)} = {v}")
                 run.clear()
 
-        for kind, a, b in self.items:
+        for kind, a, b, _ in self.items:
             if kind == "attr":
                 if "\n" in b:          # multi-line waarde: eigen groep
                     flush()
@@ -374,7 +393,7 @@ def detect_type(hint, doc):
 class Ctx:
     def __init__(self, args):
         self.args = args
-        self.blocks = defaultdict(list)      # bestandsnaam -> [hcl]
+        self.blocks = defaultdict(list)      # bestandsnaam -> [(Block, comment)]
         self.imports = []
         self.extra_files = {}                # bestandsnaam -> inhoud
         self.names = defaultdict(set)        # resource type -> gebruikte namen
@@ -397,8 +416,7 @@ class Ctx:
         return n
 
     def add(self, file, kind, block: Block, comment=None):
-        text = (f"# {comment}\n" if comment else "") + block.render() + "\n"
-        self.blocks[file].append(text)
+        self.blocks[file].append((block, comment))
         self.stats[kind][0] += 1
 
     def skip(self, kind, n=1):
@@ -577,12 +595,8 @@ def conv_ingest_pipeline(doc, ctx, space):
         b.attr("name", name)
         b.attr("description", p.get("description"))
         b.json("metadata", p.get("_meta"))
-        procs = p.get("processors") or []
-        b.attr("processors", "[\n" + "\n".join(
-            f"    {jsonenc(x, 2)}," for x in procs) + "\n  ]" if procs else "[]", raw=True)
-        if p.get("on_failure"):
-            b.attr("on_failure", "[\n" + "\n".join(
-                f"    {jsonenc(x, 2)}," for x in p["on_failure"]) + "\n  ]", raw=True)
+        b.jsonlist("processors", p.get("processors") or [])
+        b.jsonlist("on_failure", p.get("on_failure"), skip_empty=True)
         ctx.add("ingest_pipelines.tf", "ingest_pipeline", b)
         ctx.es_import(f"elasticstack_elasticsearch_ingest_pipeline.{rn}", name)
 
@@ -733,10 +747,9 @@ def conv_datastream(doc, ctx, space):
         rn = ctx.unique("dv", g["name"], "dv")
         b = Block(f'resource "elasticstack_kibana_data_view" "{rn}"')
         b.attr("space_id", sp)
-        dv = {"id": g["name"], "name": g["name"], "title": g["pattern"],
-              "time_field_name": args.time_field}
-        b.attr("data_view", "{\n" + "\n".join(
-            f"    {k.ljust(15)} = {hcl_str(v)}" for k, v in dv.items()) + "\n  }", raw=True)
+        b.key = g["name"]
+        b.attr("data_view", {"id": g["name"], "name": g["name"], "title": g["pattern"],
+                             "time_field_name": args.time_field})
         n = len(g["members"])
         ctx.add("data_views.tf", "datastream_data_view", b,
                 comment=f"{g['pattern']}: {n} data stream{'s' if n != 1 else ''}, {human(g['bytes'])}")
@@ -768,35 +781,33 @@ def conv_kibana_data_view(doc, ctx, space):
         b = Block(f'resource "elasticstack_kibana_data_view" "{rn}"')
         b.attr("space_id", sp)
         b.attr("override", ctx.args.override or None)
-        attrs = [("id", hcl_str(did)), ("name", hcl_str(dv.get("name") or dv.get("title"))),
-                 ("title", hcl_str(dv.get("title")))]
+        b.key = did
+        attrs = {"id": did, "name": dv.get("name") or dv.get("title"), "title": dv.get("title")}
         if "timeFieldName" in dv:
             if dv["timeFieldName"]:
-                attrs.append(("time_field_name", hcl_str(dv["timeFieldName"])))
+                attrs["time_field_name"] = dv["timeFieldName"]
         else:
-            attrs.append(("time_field_name", hcl_str(ctx.args.time_field)))
+            attrs["time_field_name"] = ctx.args.time_field
             ctx.stats["_dv_no_time"][0] += 1
         if dv.get("allowNoIndex") is not None:
-            attrs.append(("allow_no_index", hcl_value(dv["allowNoIndex"])))
+            attrs["allow_no_index"] = dv["allowNoIndex"]
         sf = [x.get("value") for x in dv.get("sourceFilters") or [] if x.get("value")]
         if sf:
-            attrs.append(("source_filters", hcl_value(sf)))
+            attrs["source_filters"] = sf
         rt = {k: {"type": v.get("type"), "script_source": (v.get("script") or {}).get("source")}
               for k, v in (dv.get("runtimeFieldMap") or {}).items()}
         rt = {k: {kk: vv for kk, vv in v.items() if vv is not None} for k, v in rt.items()}
         if rt:
-            attrs.append(("runtime_field_map", hcl_value(rt, 2)))
+            attrs["runtime_field_map"] = rt
         fa = {k: {kk: vv for kk, vv in (("custom_label", v.get("customLabel")), ("count", v.get("count")))
                   if vv is not None}
               for k, v in (dv.get("fieldAttrs") or {}).items()}
         fa = {k: v for k, v in fa.items() if v}
         if fa:
-            attrs.append(("field_attrs", hcl_value(fa, 2)))
+            attrs["field_attrs"] = fa
         if dv.get("fieldFormats"):
             ctx.warn(f"Data view {did}: field_formats niet omgezet (handmatig toevoegen indien nodig)")
-        w = max(len(k) for k, _ in attrs)
-        b.attr("data_view", "{\n" + "\n".join(f"    {k.ljust(w)} = {v}" for k, v in attrs) + "\n  }",
-               raw=True)
+        b.attr("data_view", attrs)
         title = dv.get("title")
         if title in ctx.names["dv_titles"]:
             ctx.warn(f"Data view {did}: pattern '{title}' bestaat al als andere data view in deze output")
@@ -862,6 +873,7 @@ def conv_space(doc, ctx, space):
             ctx.skip("space"); continue
         rn = ctx.unique("space", s["id"], "space")
         b = Block(f'resource "elasticstack_kibana_space" "{rn}"')
+        b.key = s["id"]
         b.attr("space_id", s["id"])
         b.attr("name", s.get("name"))
         b.attr("description", s.get("description") or None)
@@ -1050,7 +1062,7 @@ def _conv_one_rule(r, ctx, sp, entry):
                      ("status_change_threshold", flap.get("status_change_threshold"))]
             if flap.get("enabled") is not None:
                 items.append(("enabled", flap["enabled"]))
-            b.attr("flapping", hcl_value(dict(items), 1), raw=True)
+            b.attr("flapping", dict(items))
         art = r.get("artifacts") or {}
         dashboards = [d["id"] for d in art.get("dashboards") or [] if d.get("id")]
         guide = (art.get("investigation_guide") or {}).get("blob")
@@ -1060,7 +1072,7 @@ def _conv_one_rule(r, ctx, sp, entry):
                 a["dashboards"] = [{"id": d} for d in dashboards]
             if guide:
                 a["investigation_guide"] = {"content": guide}
-            b.attr("artifacts", hcl_value(a, 1), raw=True)
+            b.attr("artifacts", a)
         for act in actions:
             if not act.get("id"):
                 note(f"action zonder connector-ID ({act.get('connector_type_id')}) weggelaten")
@@ -1562,6 +1574,169 @@ def fetch_all(args, cp):
     return results
 
 
+# =========================================================================== for_each-output
+
+FOR_EACH_LABELS = {
+    "elasticstack_elasticsearch_index_template": "index_templates",
+    "elasticstack_elasticsearch_component_template": "component_templates",
+    "elasticstack_elasticsearch_index_lifecycle": "ilm_policies",
+    "elasticstack_elasticsearch_snapshot_lifecycle": "slm_policies",
+    "elasticstack_elasticsearch_ingest_pipeline": "ingest_pipelines",
+    "elasticstack_elasticsearch_security_role": "roles",
+    "elasticstack_elasticsearch_security_role_mapping": "role_mappings",
+    "elasticstack_kibana_data_view": "data_views",
+    "elasticstack_kibana_action_connector": "connectors",
+    "elasticstack_kibana_alerting_rule": "alerting_rules",
+    "elasticstack_kibana_space": "spaces",
+    "elasticstack_kibana_import_saved_objects": "saved_objects",
+}
+# blocks die meerdere keren mogen voorkomen: in de data altijd een lijst
+REPEATABLE_BLOCKS = {"actions", "indices", "remote_indices", "applications", "alias", "setting"}
+HEADER_RE = re.compile(r'^resource "([^"]+)" "([^"]+)"$')
+
+
+def block_schema(blocks, schema=None):
+    """Samengevoegd schema van een aantal Blocks: key -> ("attr", soort) of ("block", schema, max_aantal)."""
+    schema = {} if schema is None else schema
+    for b in blocks:
+        counts = defaultdict(int)
+        for kind, a, _, meta in b.items:
+            if kind == "attr":
+                cur = schema.get(a)
+                if cur is None:
+                    schema[a] = ("attr", meta[0])
+                elif cur[0] == "attr" and cur[1] != meta[0]:
+                    schema[a] = ("attr", "mixed")
+            elif kind == "block":
+                counts[a.header] += 1
+                cur = schema.get(a.header)
+                sub = cur[1] if cur else {}
+                block_schema([a], sub)
+                schema[a.header] = ("block", sub, max(counts[a.header], cur[2] if cur else 0))
+    return schema
+
+
+def block_data(b, schema):
+    """De waarden van één Block als HCL-data (voor de locals-map)."""
+    out = {}
+    for kind, a, _, meta in b.items:
+        if kind == "attr":
+            soort, v = meta
+            if schema[a][1] == "mixed":  # soort verschilt per object (bijv. query als string of JSON)
+                if soort == "json":
+                    v = json.dumps(v, ensure_ascii=False, separators=(",", ":"))
+                elif soort == "jsonlist":
+                    v = [json.dumps(x, ensure_ascii=False, separators=(",", ":")) for x in v]
+            out[a] = v
+        elif kind == "block":
+            sub = block_data(a, schema[a.header][1])
+            if schema[a.header][2] > 1 or a.header in REPEATABLE_BLOCKS:
+                out.setdefault(a.header, []).append(sub)
+            else:
+                out[a.header] = sub
+    return out
+
+
+def presence(datas, key):
+    return all(key in d for d in datas)
+
+
+def template(parent: Block, schema, datas, var, used=()):
+    """Vult `parent` met attributen/dynamic blocks die naar `var` (each.value / x.value) verwijzen.
+    `used`: iterator-namen van de omliggende dynamic blocks."""
+    # eerst de attributen, dan de dynamic blocks
+    for key, spec in sorted(schema.items(), key=lambda kv: kv[1][0] == "block"):
+        always = presence(datas, key)
+        ref = f"{var}.{key}" if IDENT_RE.match(key) else f'{var}[{hcl_str(key)}]'
+        if spec[0] == "attr":
+            soort = spec[1]
+            if soort == "json":
+                expr = f"jsonencode({ref})"
+            elif soort == "jsonlist":
+                expr = f"[for v in {ref} : jsonencode(v)]"
+            else:
+                expr = ref
+            parent.attr(key, expr if always else f"try({expr}, null)", raw=True)
+        else:
+            sub, many = spec[1], spec[2] > 1 or key in REPEATABLE_BLOCKS
+            if many:
+                fe = ref if always else f"try({ref}, [])"
+                children = [c for d in datas for c in d.get(key, [])]
+            else:
+                fe = f"[{ref}]" if always else f"try([{ref}], [])"
+                children = [d[key] for d in datas if key in d]
+            it = key if key not in used else f"{key}_{len(used)}"  # zelfde naam als ouder: eigen iterator
+            dyn = parent.block(f'dynamic "{key}"')
+            dyn.attr("for_each", fe, raw=True)
+            if it != key:
+                dyn.attr("iterator", it, raw=True)
+            template(dyn.block("content"), sub, children, f"{it}.value", (*used, it))
+
+
+def render_for_each(entries, addr_map):
+    """[(Block, comment)] van één bestand -> HCL met per resource-type een locals-map en één resource.
+    Vult addr_map met oud adres -> nieuw adres (voor imports en verwijzingen)."""
+    groups, order = defaultdict(list), []
+    for b, comment in entries:
+        m = HEADER_RE.match(b.header)
+        rtype = m.group(1) if m else None
+        if rtype not in FOR_EACH_LABELS:
+            rtype = ("__single__", id(b))
+        if rtype not in groups:
+            order.append(rtype)
+        groups[rtype].append((b, comment))
+    out = []
+    for rtype in order:
+        items = groups[rtype]
+        if isinstance(rtype, tuple):
+            b, comment = items[0]
+            out.append((f"# {comment}\n" if comment else "") + b.render() + "\n")
+            continue
+        label = FOR_EACH_LABELS[rtype]
+        schema = block_schema([b for b, _ in items])
+        keys, datas, lines = set(), [], []
+        for b, comment in items:
+            rn = HEADER_RE.match(b.header).group(2)
+            name = next((m[1] for k, a, _, m in b.items if k == "attr" and a == "name" and m[0] == "val"), None)
+            key = str(b.key or name or rn)
+            base, i = key, 2
+            while key in keys:
+                key, i = f"{base} ({i})", i + 1
+            keys.add(key)
+            addr_map[f"{rtype}.{rn}"] = f"{rtype}.{label}[{hcl_str(key)}]"
+            data = block_data(b, schema)
+            datas.append(data)
+            if comment:
+                lines.append(f"    # {comment}")
+            lines.append(f"    {hcl_str(key)} = {hcl_value(data, 2)}")
+        out.append("locals {\n  " + label + " = {\n" + "\n\n".join(_join_entries(lines)) + "\n  }\n}\n")
+        res = Block(f'resource "{rtype}" "{label}"')
+        res.attr("for_each", f"local.{label}", raw=True)
+        res.blank()
+        template(res, schema, datas, "each.value")
+        out.append(res.render() + "\n")
+    return "\n".join(out)
+
+
+def _join_entries(lines):
+    """Commentaarregel en entry bij elkaar houden; lege regel tussen entries."""
+    chunks, cur = [], []
+    for line in lines:
+        cur.append(line)
+        if not line.lstrip().startswith("#"):
+            chunks.append("\n".join(cur))
+            cur = []
+    return chunks
+
+
+def apply_addr_map(text, addr_map):
+    if not addr_map:
+        return text
+    pat = re.compile(r"(?<![\w.\"])(" + "|".join(re.escape(k) for k in sorted(addr_map, key=len, reverse=True))
+                     + r")(?![\w-])")
+    return pat.sub(lambda m: addr_map[m.group(1)], text)
+
+
 # =========================================================================== main
 
 CONVERTERS = {
@@ -1625,6 +1800,9 @@ def main():
     p.add_argument("--no-keep-ids", action="store_true",
                    help="rule_id/connector_id niet overnemen (doel genereert nieuwe)")
     p.add_argument("--with-provider", action="store_true", help="terraform/provider block toevoegen")
+    p.add_argument("--no-for-each", action="store_true",
+                   help="Elk object als los resource-block (zoals vóór v0.4.0) i.p.v. één resource "
+                        "met for_each over een locals-map per type")
     p.add_argument("--with-imports", action="store_true", help="import-blocks toevoegen (TF >= 1.5)")
     p.add_argument("--cluster-uuid", help="Cluster UUID voor import-IDs van ES-resources (GET /)")
 
@@ -1746,9 +1924,13 @@ def main():
 
     # ---- output samenstellen
     header = f"# Gegenereerd door {SCRIPT_NAME} v{__version__} — niet handmatig aanpassen, opnieuw genereren.\n"
-    files = {}
-    for fname, blocks in ctx.blocks.items():
-        files[fname] = header + "\n" + resolve_connector_refs(ctx, "\n".join(blocks))
+    files, addr_map = {}, {}
+    for fname, entries in ctx.blocks.items():
+        if args.no_for_each:
+            body = "\n".join((f"# {c}\n" if c else "") + b.render() + "\n" for b, c in entries)
+        else:
+            body = render_for_each(entries, addr_map)
+        files[fname] = header + "\n" + resolve_connector_refs(ctx, body)
     loc = connector_locals(ctx)
     if loc:
         files["alerting_rules.tf"] = files.get("alerting_rules.tf", header) .replace(
@@ -1759,6 +1941,7 @@ def main():
         files["provider.tf"] = header + "\n" + PROVIDER_BLOCK
     if ctx.imports:
         files["imports.tf"] = header + "\n" + "\n".join(ctx.imports)
+    files = {k: apply_addr_map(v, addr_map) for k, v in files.items()}
 
     if args.output_dir:
         os.makedirs(args.output_dir, exist_ok=True)

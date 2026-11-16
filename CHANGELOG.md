@@ -4,6 +4,18 @@ Alle noemenswaardige wijzigingen in dit project. Formaat volgens
 [Keep a Changelog](https://keepachangelog.com/nl/1.1.0/), versies volgens
 [Semantic Versioning](https://semver.org/).
 
+## [0.4.0] - 2026-11-16
+
+### Gewijzigd
+- Het script heet nu `elastic2tf.py` (was `devtools2tf.py`), gelijk aan de naam van het project.
+- Terraform-output: per resource-type één resource met `for_each` over een `locals`-map, in
+  plaats van een los block per object. Geneste blocks worden `dynamic` blocks; velden die niet
+  bij elk object voorkomen via `try()`. Import-blocks en connector-verwijzingen gebruiken de
+  nieuwe adressen. **Let op:** de adressen in de state veranderen; zie de README.
+
+### Toegevoegd
+- `--no-for-each`: de oude output (elk object als los resource-block).
+
 ## [0.3.1] - 2026-11-16
 
 ### Gewijzigd
@@ -35,5 +47,6 @@ Eerste publieke versie.
   samenvatting.
 - Documentatie van het script in de README.
 
+[0.4.0]: https://github.com/rbr101/elastic2tf/releases/tag/v0.4.0
 [0.3.1]: https://github.com/rbr101/elastic2tf/releases/tag/v0.3.1
 [0.3.0]: https://github.com/rbr101/elastic2tf/releases/tag/v0.3.0

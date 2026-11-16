@@ -1,6 +1,6 @@
 # elastic2tf
 
-`devtools2tf.py` zet Kibana Dev Tools (Console) output om naar Terraform-code voor de
+`elastic2tf.py` zet Kibana Dev Tools (Console) output om naar Terraform-code voor de
 [`elastic/elasticstack`](https://registry.terraform.io/providers/elastic/elasticstack) provider.
 Het type output (index templates, ILM, ingest pipelines, rollen, connectors, alerting rules,
 data views, spaces, saved objects, …) wordt automatisch herkend.
@@ -26,11 +26,11 @@ Vereist alleen Python 3.8+ (geen extra packages).
 ```bash
 # 1. Voer in Dev Tools de gewenste GET-calls uit en kopieer de volledige output naar export.txt
 # 2. Omzetten:
-./devtools2tf.py -i export.txt --output-dir terraform/
+./elastic2tf.py -i export.txt --output-dir terraform/
 # Of direct via de API (wachtwoord wordt gevraagd):
-./devtools2tf.py --fetch --output-dir terraform/
-./devtools2tf.py --list-types     # ondersteunde types
-./devtools2tf.py --help           # alle opties
+./elastic2tf.py --fetch --output-dir terraform/
+./elastic2tf.py --list-types     # ondersteunde types
+./elastic2tf.py --help           # alle opties
 ```
 
 ## Werkwijze
@@ -43,13 +43,13 @@ Vereist alleen Python 3.8+ (geen extra packages).
 3. Zet het om:
 
    ```bash
-   ./devtools2tf.py -i export.txt --output-dir terraform/
+   ./elastic2tf.py -i export.txt --output-dir terraform/
    ```
 
 4. Controleer de gegenereerde `.tf`-bestanden en de samenvatting op stderr. Voer daarna
    `terraform init` en `terraform plan` uit.
 
-Input kan ook via stdin: `cat export.txt | ./devtools2tf.py > main.tf`.
+Input kan ook via stdin: `cat export.txt | ./elastic2tf.py > main.tf`.
 
 ## Direct ophalen via de API
 
@@ -82,8 +82,8 @@ de Kibana-API. Daarvoor is een configbestand met de URL's en gebruikersnamen nod
    (zie [Kiezen wat je ophaalt](#kiezen-wat-je-ophaalt)):
 
    ```bash
-   ./devtools2tf.py --fetch --output-dir terraform/          # alles (of [fetch] types uit de config)
-   ./devtools2tf.py --fetch ilm index_template -o es.tf      # alleen deze resources
+   ./elastic2tf.py --fetch --output-dir terraform/          # alles (of [fetch] types uit de config)
+   ./elastic2tf.py --fetch ilm index_template -o es.tf      # alleen deze resources
    ```
 
 3. Het **wachtwoord** wordt in de terminal gevraagd. Wat je typt is niet zichtbaar, en het
@@ -100,15 +100,15 @@ Na `--fetch` geef je op wat er opgehaald moet worden. Dat kan op drie manieren, 
 **1. Type** (zoals in `--list-types`), meerdere gescheiden door spaties of komma's:
 
 ```bash
-./devtools2tf.py --fetch ilm index_template role -o es.tf
-./devtools2tf.py --fetch alerting_rule,connector -o alerting.tf
+./elastic2tf.py --fetch ilm index_template role -o es.tf
+./elastic2tf.py --fetch alerting_rule,connector -o alerting.tf
 ```
 
 **2. Terraform-resource**, met of zonder `elasticstack_`-prefix:
 
 ```bash
-./devtools2tf.py --fetch elasticstack_elasticsearch_index_lifecycle elasticstack_kibana_alerting_rule -o x.tf
-./devtools2tf.py --fetch elasticsearch_ingest_pipeline kibana_action_connector -o x.tf
+./elastic2tf.py --fetch elasticstack_elasticsearch_index_lifecycle elasticstack_kibana_alerting_rule -o x.tf
+./elastic2tf.py --fetch elasticsearch_ingest_pipeline kibana_action_connector -o x.tf
 ```
 
 **3. De Dev Tools-call zelf**, in dezelfde notatie als in de tabel
@@ -118,19 +118,19 @@ iets uit een andere space:
 
 ```bash
 # één ILM-policy en de index templates die met "mijn-" beginnen
-./devtools2tf.py --fetch "GET _ilm/policy/mijn-policy" "GET _index_template/mijn-*" -o x.tf
+./elastic2tf.py --fetch "GET _ilm/policy/mijn-policy" "GET _index_template/mijn-*" -o x.tf
 
 # data streams met een ander pattern
-./devtools2tf.py --fetch "GET _data_stream/metrics-*/_stats?human" -o dv.tf
+./elastic2tf.py --fetch "GET _data_stream/metrics-*/_stats?human" -o dv.tf
 
 # connectors uit space "ops", en één rule op ID
-./devtools2tf.py --fetch "GET kbn:/s/ops/api/actions/connectors" "GET kbn:/api/alerting/rule/<id>" -o x.tf
+./elastic2tf.py --fetch "GET kbn:/s/ops/api/actions/connectors" "GET kbn:/api/alerting/rule/<id>" -o x.tf
 
 # alleen Observability-rules, met een filter (spaties in de query mogen)
-./devtools2tf.py --fetch "GET kbn:/api/alerting/rules/_find?filter=alert.attributes.consumer:(observability or logs)" -o rules.tf
+./elastic2tf.py --fetch "GET kbn:/api/alerting/rules/_find?filter=alert.attributes.consumer:(observability or logs)" -o rules.tf
 
 # één dashboard met alles waar het naar verwijst (body als JSON achter het pad)
-./devtools2tf.py --fetch 'POST kbn:/api/saved_objects/_export {"objects":[{"type":"dashboard","id":"<id>"}]}' -o dash.tf
+./elastic2tf.py --fetch 'POST kbn:/api/saved_objects/_export {"objects":[{"type":"dashboard","id":"<id>"}]}' -o dash.tf
 ```
 
 Bij calls doet het script automatisch:
@@ -204,8 +204,8 @@ Met `--save-export BESTAND` worden de opgehaalde responses ook bewaard in Dev To
 bestand kun je later opnieuw omzetten met `-i`, zonder opnieuw te verbinden:
 
 ```bash
-./devtools2tf.py --fetch --save-export export.txt --output-dir tf/
-./devtools2tf.py -i export.txt --only alerting_rule --report rules.csv --output-dir tf/
+./elastic2tf.py --fetch --save-export export.txt --output-dir tf/
+./elastic2tf.py -i export.txt --only alerting_rule --report rules.csv --output-dir tf/
 ```
 
 Let op: zo'n export kan gevoelige data bevatten. `export*.txt` staat in `.gitignore`.
@@ -290,6 +290,7 @@ gerefereerde objecten (data views, visualisaties). Een `export.ndjson` uit
 | `--include-managed` | Ook door Elastic/Fleet beheerde en reserved objecten meenemen. |
 | `--no-keep-ids` | `rule_id` en `connector_id` niet overnemen; het doel genereert nieuwe. |
 | `--with-provider` | Voegt `provider.tf` toe met het `terraform`- en `provider`-block. |
+| `--no-for-each` | Elk object als los resource-block in plaats van één resource met `for_each` per type (zie [Output](#output)). |
 | `--with-imports` | Voegt `imports.tf` toe met `import`-blocks (Terraform ≥ 1.5). |
 | `--cluster-uuid UUID` | Cluster UUID (uit `GET /`) voor import-ID's van ES-resources. |
 | `-V`, `--version` | Toon de versie. |
@@ -336,33 +337,33 @@ gerefereerde objecten (data views, visualisaties). Een `export.ndjson` uit
 
 ```bash
 # Alles direct ophalen via de API en de ruwe data bewaren
-./devtools2tf.py --fetch --save-export export.txt --output-dir tf/
+./elastic2tf.py --fetch --save-export export.txt --output-dir tf/
 
 # Alleen rules en connectors ophalen, met import-blocks (cluster UUID wordt opgehaald)
-./devtools2tf.py --fetch alerting_rule connector --with-imports --output-dir tf/
+./elastic2tf.py --fetch alerting_rule connector --with-imports --output-dir tf/
 
 # Eén ILM-policy direct ophalen
-./devtools2tf.py --fetch "GET _ilm/policy/mijn-policy" -o ilm.tf
+./elastic2tf.py --fetch "GET _ilm/policy/mijn-policy" -o ilm.tf
 
 # Alles uit één export, één bestand per type
-./devtools2tf.py -i export.txt --output-dir tf/
+./elastic2tf.py -i export.txt --output-dir tf/
 
 # Rules en connectors samen, in één bestand
-./devtools2tf.py -i rules.json -i connectors.json -o alerting.tf
+./elastic2tf.py -i rules.json -i connectors.json -o alerting.tf
 
 # Type forceren als het niet herkend wordt
-./devtools2tf.py -i ilm:policies.json
+./elastic2tf.py -i ilm:policies.json
 
 # Alleen ILM en index templates, met provider- en import-blocks
-./devtools2tf.py -i export.txt --only ilm --only index_template \
+./elastic2tf.py -i export.txt --only ilm --only index_template \
   --with-provider --with-imports --cluster-uuid AbCdEf123 --output-dir tf/
 
 # Rules overzetten naar een ander cluster, met controle op connectors en een Excel-rapport
-./devtools2tf.py -i rules.json -i connectors.json \
+./elastic2tf.py -i rules.json -i connectors.json \
   --target-connectors doel-connectors.json --report rules.csv --output-dir tf/
 
 # Alleen dashboards waarvan de titel met "itoa" begint
-./devtools2tf.py -i dashboards.ndjson --title-filter 'itoa*' --output-dir tf/
+./elastic2tf.py -i dashboards.ndjson --title-filter 'itoa*' --output-dir tf/
 ```
 
 ## Output
@@ -384,6 +385,68 @@ Met `--output-dir` komt elk type in een eigen bestand:
 | `variables.tf` | variabele `connector_secrets` (alleen als er connectors met secrets zijn) |
 | `provider.tf` | alleen met `--with-provider` |
 | `imports.tf` | alleen met `--with-imports` |
+
+### for_each per resource-type
+
+Per resource-type maakt het script **één** resource met `for_each` over een `locals`-map. De map
+bevat per object de gegevens; de resource haalt ze op met `each.value`. Geneste blocks
+(ILM-fasen, `indices` van een rol, `actions` van een rule, …) worden `dynamic` blocks. Een
+voorbeeld met data views uit data streams:
+
+```hcl
+locals {
+  data_views = {
+    # logs-nginx*: 1 data stream, 2.0kb
+    "logs-nginx" = {
+      space_id  = "default"
+      data_view = {
+        id              = "logs-nginx"
+        name            = "logs-nginx"
+        title           = "logs-nginx*"
+        time_field_name = "@timestamp"
+      }
+    }
+
+    # logs-system*: 1 data stream, 1000b
+    "logs-system" = {
+      space_id  = "default"
+      data_view = {
+        id              = "logs-system"
+        name            = "logs-system"
+        title           = "logs-system*"
+        time_field_name = "@timestamp"
+      }
+    }
+  }
+}
+
+resource "elasticstack_kibana_data_view" "data_views" {
+  for_each = local.data_views
+
+  space_id  = each.value.space_id
+  data_view = each.value.data_view
+}
+```
+
+- **Sleutels** in de map zijn de naam van het object (ID bij data views en spaces). Bij dubbele
+  namen krijgt de volgende ` (2)` erachter. Het Terraform-adres wordt bijvoorbeeld
+  `elasticstack_elasticsearch_index_lifecycle.ilm_policies["mijn-policy"]`.
+- **Velden die niet bij elk object voorkomen** worden in de resource opgehaald met
+  `try(each.value.veld, null)`; zo kan elk object zijn eigen set velden hebben.
+- **JSON-velden** (`settings`, `mappings`, `params`, `processors`, …) staan in de map als gewone
+  HCL-objecten en worden in de resource met `jsonencode()` omgezet.
+- Ook bij één object wordt `for_each` gebruikt, zodat het adres niet verandert als er later
+  objecten bijkomen.
+- `cluster_settings` blijft één los block (er is maar één cluster).
+- Import-blocks en verwijzingen van rules naar connectors gebruiken automatisch de nieuwe adressen.
+
+Met `--no-for-each` krijg je de oude vorm: elk object als los resource-block.
+
+> Let op bij overstappen vanaf v0.3.x of eerder: de adressen in de Terraform-state veranderen
+> (van `type.naam` naar `type.label["sleutel"]`). Gebruik bij een bestaande state `moved`-blocks
+> of `terraform state mv`, of blijf `--no-for-each` gebruiken.
+
+### Bestanden
 
 Met `-o` komt alles in één bestand, met een scheidingsregel per onderdeel. Het
 `saved_objects.ndjson`-bestand wordt dan naast dat bestand gezet. Zonder `-o` en `--output-dir`
@@ -505,7 +568,7 @@ verwijderd.
 ## Versie
 
 ```bash
-./devtools2tf.py --version
+./elastic2tf.py --version
 ```
 
 De versie staat ook bovenaan elk gegenereerd `.tf`-bestand
@@ -520,6 +583,6 @@ Versioning volgt [Semantic Versioning](https://semver.org/):
 
 ### Nieuwe versie uitbrengen
 
-1. Pas `__version__` aan in `devtools2tf.py`.
+1. Pas `__version__` aan in `elastic2tf.py`.
 2. Voeg een sectie toe aan `CHANGELOG.md`.
 3. Commit en tag: `git tag -a vX.Y.Z -m "vX.Y.Z" && git push --follow-tags`
