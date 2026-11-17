@@ -53,7 +53,8 @@ Gedrag
     "-default" aan het eind wordt weggelaten, en er komt een overkoepelende
     data view "logs-" met pattern "logs-*" bij (--catch-all / --no-catch-all).
   - Connector-secrets worden niet geëxporteerd door Kibana; ze komen uit
-    var.connector_secrets.
+    var.connector_secrets (map per bron-connector-ID met de secret-velden), te vullen
+    in een *.auto.tfvars.
   - Alerting rules verwijzen automatisch naar de connector-resources als de
     connectors in dezelfde run zitten; anders via een locals-map om te mappen.
   - Met --cluster-uuid worden ook import-blocks voor ES-resources gemaakt
@@ -72,7 +73,7 @@ Voorbeelden
   ./elastic2tf.py --list-types
 """
 
-__version__ = "0.7.0"
+__version__ = "0.8.0"
 
 import argparse
 import fnmatch
@@ -176,6 +177,13 @@ class Block:
         rendered = ("[\n" + "\n".join(f"{pad}{jsonenc(x, self.indent + 2)}," for x in values)
                     + "\n" + "  " * (self.indent + 1) + "]") if values else "[]"
         self.items.append(("attr", key, rendered, ("jsonlist", list(values))))
+        return self
+
+    def secret_ref(self, key, ref_id):
+        """Verwijzing naar var.connector_secrets[ref_id]. In for_each-vorm staat alleen ref_id in de
+        map (gevoelige waarden mogen niet in for_each), de resource haalt de secrets zelf op."""
+        expr = f"try(jsonencode(var.connector_secrets[{hcl_str(ref_id)}]), null)"
+        self.items.append(("attr", key, expr, ("secretref", ref_id)))
         return self
 
     def block(self, header: str) -> "Block":
@@ -953,7 +961,7 @@ def conv_connector(doc, ctx, space):
                         f"krijgt een nieuw ID; rules verwijzen naar deze resource")
         if ctype not in NO_SECRET_TYPES:
             ctx.need_secrets_var = True
-            b.attr("secrets", f"lookup(var.connector_secrets, {hcl_str(cid)}, null)", raw=True)
+            b.secret_ref("secrets", cid)
             comment += f" — secrets: {SECRET_HINTS.get(ctype, 'zie Kibana connector docs')}"
         ctx.add("connectors.tf", "connector", b, comment=comment)
         ctx.imp(addr, f"{sp}/{cid}")
@@ -1761,6 +1769,9 @@ def block_data(b, schema):
     for kind, a, _, meta in b.items:
         if kind == "attr":
             soort, v = meta
+            if soort == "secretref":  # alleen het ID in de data, niet de secrets zelf
+                out[a + "_id"] = v
+                continue
             if schema[a][1] == "mixed":  # soort verschilt per object (bijv. query als string of JSON)
                 if soort == "json":
                     v = json.dumps(v, ensure_ascii=False, separators=(",", ":"))
@@ -1856,6 +1867,11 @@ def template(parent: Block, schema, datas, var, used=(), hoisted=None):
             continue
         always = presence(datas, key)
         ref = f"{var}.{key}" if IDENT_RE.match(key) else f'{var}[{hcl_str(key)}]'
+        if spec[0] == "attr" and spec[1] == "secretref":
+            ref_id = f"{var}.{key}_id"
+            ex = f"try(jsonencode(var.connector_secrets[{ref_id}]), null)"
+            parent.attr(key, ex, raw=True)
+            continue
         if spec[0] == "attr":
             soort = spec[1]
             if soort == "json":
@@ -1978,8 +1994,8 @@ provider "elasticstack" {
 '''
 
 SECRETS_VAR = '''variable "connector_secrets" {
-  description = "Secrets per connector-ID als JSON-string, bijv. jsonencode({ webhookUrl = \\"...\\" })"
-  type        = map(string)
+  description = "Secrets per bron-connector-ID, bijv. { \\"<id>\\" = { webhookUrl = \\"...\\" } }"
+  type        = map(map(string))
   sensitive   = true
   default     = {}
 }
@@ -2002,6 +2018,9 @@ def main():
     p.add_argument("--no-keep-ids", action="store_true",
                    help="rule_id/connector_id niet overnemen (doel genereert nieuwe)")
     p.add_argument("--with-provider", action="store_true", help="terraform/provider block toevoegen")
+    p.add_argument("--with-moved", action="store_true",
+                   help="moved.tf toevoegen: verplaatst resources in een bestaande state van losse "
+                        "blocks (v0.3.x of --no-for-each) naar de for_each-adressen, i.p.v. destroy/create")
     p.add_argument("--no-for-each", action="store_true",
                    help="Elk object als los resource-block (zoals vóór v0.4.0) i.p.v. één resource "
                         "met for_each over een locals-map per type")
@@ -2157,7 +2176,12 @@ def main():
         files["provider.tf"] = header + "\n" + PROVIDER_BLOCK
     if ctx.imports:
         files["imports.tf"] = header + "\n" + "\n".join(ctx.imports)
-    files = {k: apply_addr_map(v, addr_map) for k, v in files.items()}
+    if args.with_moved and addr_map:
+        files["moved.tf"] = header + (
+            "# Verplaatst resources uit de state van een eerdere versie (losse blocks) naar de\n"
+            "# for_each-adressen. Na een geslaagde apply mag dit bestand weg.\n\n") + "\n".join(
+            f"moved {{\n  from = {old}\n  to   = {new}\n}}\n" for old, new in addr_map.items())
+    files = {k: (v if k == "moved.tf" else apply_addr_map(v, addr_map)) for k, v in files.items()}
 
     if args.output_dir:
         os.makedirs(args.output_dir, exist_ok=True)

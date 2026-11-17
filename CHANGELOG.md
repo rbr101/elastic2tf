@@ -4,6 +4,20 @@ Alle noemenswaardige wijzigingen in dit project. Formaat volgens
 [Keep a Changelog](https://keepachangelog.com/nl/1.1.0/), versies volgens
 [Semantic Versioning](https://semver.org/).
 
+## [0.8.0] - 2026-11-17
+
+### Gewijzigd
+- `var.connector_secrets` is nu `map(map(string))`: per bron-connector-ID een object met de
+  secret-velden, zonder `jsonencode()` (functies zijn in `.tfvars` niet toegestaan). De
+  `.tf`-code doet `try(jsonencode(var.connector_secrets[id]), null)`.
+  **Let op:** bestaande `.tfvars` met JSON-strings omzetten naar objecten.
+- In de `for_each`-map van connectors staat alleen het ID (`secrets_id`), niet de secrets:
+  gevoelige waarden zijn niet toegestaan in `for_each`.
+
+### Toegevoegd
+- `--with-moved`: maakt `moved.tf` om een bestaande state van losse blocks (v0.3.x of
+  `--no-for-each`) naar de `for_each`-adressen te verplaatsen, in plaats van destroy/create.
+
 ## [0.7.0] - 2026-11-17
 
 ### Toegevoegd
@@ -90,6 +104,7 @@ Eerste publieke versie.
   samenvatting.
 - Documentatie van het script in de README.
 
+[0.8.0]: https://github.com/rbr101/elastic2tf/releases/tag/v0.8.0
 [0.7.0]: https://github.com/rbr101/elastic2tf/releases/tag/v0.7.0
 [0.6.0]: https://github.com/rbr101/elastic2tf/releases/tag/v0.6.0
 [0.5.0]: https://github.com/rbr101/elastic2tf/releases/tag/v0.5.0

@@ -292,6 +292,7 @@ gerefereerde objecten (data views, visualisaties). Een `export.ndjson` uit
 | `--include-managed` | Ook door Elastic/Fleet beheerde en reserved objecten meenemen. |
 | `--no-keep-ids` | `rule_id` en `connector_id` niet overnemen; het doel genereert nieuwe. |
 | `--with-provider` | Voegt `provider.tf` toe met het `terraform`- en `provider`-block. |
+| `--with-moved` | Voegt `moved.tf` toe om een bestaande state van losse blocks (v0.3.x of `--no-for-each`) naar de `for_each`-adressen te verplaatsen. |
 | `--no-for-each` | Elk object als los resource-block in plaats van één resource met `for_each` per type (zie [Output](#output)). |
 | `--with-imports` | Voegt `imports.tf` toe met `import`-blocks (Terraform ≥ 1.5). |
 | `--cluster-uuid UUID` | Cluster UUID (uit `GET /`) voor import-ID's van ES-resources. |
@@ -398,6 +399,7 @@ Met `--output-dir` komt elk type in een eigen bestand:
 | `variables.tf` | variabele `connector_secrets` (alleen als er connectors met secrets zijn) |
 | `provider.tf` | alleen met `--with-provider` |
 | `imports.tf` | alleen met `--with-imports` |
+| `moved.tf` | alleen met `--with-moved` |
 
 ### for_each per resource-type
 
@@ -457,9 +459,12 @@ input aan en genereer opnieuw, in plaats van de `.tf`-bestanden met de hand te w
 
 Met `--no-for-each` krijg je de oude vorm: elk object als los resource-block.
 
-> Let op bij overstappen vanaf v0.3.x of eerder: de adressen in de Terraform-state veranderen
-> (van `type.naam` naar `type.label["sleutel"]`). Gebruik bij een bestaande state `moved`-blocks
-> of `terraform state mv`, of blijf `--no-for-each` gebruiken.
+> **Overstappen vanaf v0.3.x of `--no-for-each`:** de adressen in de Terraform-state veranderen
+> (van `type.naam` naar `type.label["sleutel"]`). Zonder maatregel ziet `terraform plan` dat als
+> verwijderen + opnieuw aanmaken. Genereer daarom met **`--with-moved`**: dat maakt `moved.tf`
+> met een `moved`-block per resource, zodat Terraform de bestaande resources in de state
+> verplaatst. Controleer met `terraform plan` dat er alleen *moved* staat en geen *destroy*;
+> na een geslaagde `apply` mag `moved.tf` weg. Of blijf `--no-for-each` gebruiken.
 
 ### Bestanden
 
@@ -595,6 +600,47 @@ naar de bestaande connectors (zie hieronder, en `--target-connectors`). Connecto
 in de input zet, worden wel gewoon omgezet. Wil je dat Terraform bestaande connectors
 overneemt in plaats van nieuwe aan te maken, gebruik dan `--with-imports`.
 
+### Connector-secrets
+
+Kibana exporteert geen secrets (webhook-URL's, wachtwoorden, tokens). Die vul je zelf in, in de
+variabele `connector_secrets`. Het script maakt daarvoor:
+
+- `variables.tf` met de declaratie (`map(map(string))`, `sensitive`). Laat dit bestand zoals het is;
+- in `connectors.tf` per connector
+  `secrets = try(jsonencode(var.connector_secrets[<bron-connector-ID>]), null)`.
+  In de `for_each`-map staat alleen het ID (`secrets_id`): gevoelige waarden mogen niet in
+  `for_each`.
+
+Zet de waarden in een eigen bestand naast de `.tf`-bestanden, bijv.
+`connector_secrets.auto.tfvars` (wordt automatisch geladen), en zet dat **niet** in git
+(`*.auto.tfvars` in `.gitignore`):
+
+```hcl
+connector_secrets = {
+  # Slack ops (.slack)
+  "11111111-1111-1111-1111-111111111111" = {
+    webhookUrl = "https://hooks.slack.com/services/T000/B000/XXXX"
+  }
+
+  # Mail team (.email)
+  "22222222-2222-2222-2222-222222222222" = {
+    user     = "alerts@example.nl"
+    password = "geheim"
+  }
+}
+```
+
+- De **sleutel** is het connector-ID op het **broncluster** (staat in `connectors.tf` bij
+  `secrets_id`), ook als de connector op het doel een nieuw ID krijgt.
+- De **velden** staan in het commentaar boven elke connector (bijv. `webhookUrl` voor Slack/Teams,
+  `user`/`password` voor e-mail en webhook, `routingKey` voor PagerDuty).
+- Gebruik in een `.tfvars` geen functies zoals `jsonencode()`; dat is daar niet toegestaan. Het
+  script doet de `jsonencode()` in de `.tf`-code.
+- Geen sleutel voor een connector: dan geen secrets (`null`). Voor types die secrets nodig
+  hebben (bijv. Slack) faalt `apply` dan.
+- Zonder bestand kan het ook via een omgevingsvariabele:
+  `export TF_VAR_connector_secrets='{"<id>":{"webhookUrl":"https://..."}}'`.
+
 ### Overige details
 
 - Standaard worden alleen **Observability**-rules omgezet (types `observability.*`, `logs.*`,
@@ -607,16 +653,7 @@ overneemt in plaats van nieuwe aan te maken, gebruik dan `--with-imports`.
   dan op naam, en vult het juiste ID in.
 - De provider accepteert alleen UUID's als `connector_id`. Connectors met een ander ID krijgen
   een nieuw ID; rules verwijzen dan via de resource.
-- **Secrets** worden niet door Kibana geëxporteerd. Ze komen uit `var.connector_secrets`
-  (map van connector-ID naar JSON-string). Zet die in een `*.auto.tfvars` die niet in git staat:
-
-  ```hcl
-  connector_secrets = {
-    "3f1c...-uuid" = "{\"webhookUrl\":\"https://hooks.slack.com/...\"}"
-  }
-  ```
-
-  Het commentaar boven elke connector noemt welke secret-velden nodig zijn.
+- **Secrets** worden niet door Kibana geëxporteerd; zie [Connector-secrets](#connector-secrets).
 - Niet overgenomen (provider ondersteunt het niet): mute/snooze, system actions en
   `alerts_filter.query.filters` (alleen `kql` wordt overgenomen).
 - Eén defecte rule houdt de rest niet tegen. Na afloop volgt een **rapport** per rule met de
