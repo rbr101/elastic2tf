@@ -631,13 +631,14 @@ def parse_items(args):
     """--items (en het oude --pipelines) -> {type of '*': [patronen]}.
     'type:patroon' geldt alleen voor dat type (type, Terraform-resource of alias zoals bij --fetch)."""
     aliases, out = spec_aliases(), defaultdict(list)
-    for item in name_filter(getattr(args, "items", None)):
-        pre, sep, rest = item.partition(":")
-        t = aliases.get(pre.strip().lower()) if sep else None
-        if t and rest.strip():
-            out[t].append(rest.strip())
-        else:
-            out["*"].append(item)
+    for value in getattr(args, "items", None) or []:
+        current = "*"  # een type geldt ook voor de namen erna, tot het volgende type:
+        for item in name_filter([value]):
+            pre, sep, rest = item.partition(":")
+            t = aliases.get(pre.strip().lower()) if sep else None
+            if t and rest.strip():
+                current, item = t, rest.strip()
+            out[current].append(item)
     for item in name_filter(getattr(args, "pipelines", None)):
         out["ingest_pipeline"].append(item)
     return dict(out)
@@ -1981,7 +1982,8 @@ def main():
     p.add_argument("--items", action="append", default=[], metavar="NAMEN",
                    help="Alleen deze objecten omzetten: komma-gescheiden namen, globs mogen "
                         "(hoofdletterongevoelig, herhaalbaar). 'naam' geldt voor alle types, "
-                        "'type:naam' alleen voor dat type, bijv. 'ilm:logs-*,ingest_pipeline:app'. "
+                        "'type:naam' alleen voor dat type; het type geldt ook voor de namen erna, "
+                        "bijv. 'ilm:logs-*,metrics-*,role:lezer'. "
                         "Exact genoemde objecten gaan ook mee als ze beheerd zijn.")
     p.add_argument("--pipelines", action="append", default=[], metavar="NAMEN",
                    help="Verouderd: gelijk aan --items ingest_pipeline:NAMEN")

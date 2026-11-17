@@ -352,7 +352,7 @@ gerefereerde objecten (data views, visualisaties). Een `export.ndjson` uit
 ./elastic2tf.py --fetch alerting_rule connector --with-imports --output-dir tf/
 
 # Alleen twee ingest pipelines omzetten
-./elastic2tf.py --fetch --items ingest_pipeline:logs-app,ingest_pipeline:logs-web -o pipelines.tf
+./elastic2tf.py --fetch --items ingest_pipeline:logs-app,logs-web -o pipelines.tf
 
 # Eén ILM-policy direct ophalen
 ./elastic2tf.py --fetch "GET _ilm/policy/mijn-policy" -o ilm.tf
@@ -527,7 +527,7 @@ resource-type:
 
 ```bash
 # alleen deze ingest pipelines
-./elastic2tf.py -i export.txt --items 'ingest_pipeline:logs-app,ingest_pipeline:logs-web*' -o pipelines.tf
+./elastic2tf.py -i export.txt --items 'ingest_pipeline:logs-app,logs-web*' -o pipelines.tf
 
 # per type iets anders
 ./elastic2tf.py --fetch --items 'ilm:logs-*,role:lezer,alerting_rule:CPU*' --output-dir tf/
@@ -536,13 +536,16 @@ resource-type:
 ./elastic2tf.py --fetch ingest_pipeline --items logs-app,logs-web -o pipelines.tf
 ```
 
-- **`naam`** geldt voor alle types; **`type:naam`** alleen voor dat type. Als type kun je
+- **`naam`** geldt voor alle types; **`type:naam`** alleen voor dat type. Het type geldt ook
+  voor de namen die erna komen, tot het volgende `type:`: `ilm:a,b,role:c,d` betekent ILM `a`
+  en `b`, rollen `c` en `d`. Wil je daarna weer namen voor alle types, gebruik dan een aparte
+  `--items`. Als type kun je
   hetzelfde gebruiken als bij `--fetch`: het type (`ilm`), de Terraform-resource
   (`elasticstack_elasticsearch_index_lifecycle`) of de korte vorm (`index_lifecycle`).
 - Types waarvoor geen `--items` gelden, worden gewoon helemaal omgezet. Met
   `--items ilm:logs-*` worden dus alleen de ILM-policies gefilterd.
 - Namen zijn **hoofdletterongevoelig**; `*` en `?` werken als wildcard (zet ze tussen quotes).
-- Komma-gescheiden en herhaalbaar: `--items ilm:a,ilm:b --items 'role:ops-*'`.
+- Herhaalbaar: `--items ilm:a,b --items 'role:ops-*'`.
 - Een object dat je **exact** noemt, gaat ook mee als het door Elastic of Fleet beheerd wordt
   (bijv. `ingest_pipeline:logs-system@custom`). Via een glob gaan beheerde objecten alleen mee
   met `--include-managed`.

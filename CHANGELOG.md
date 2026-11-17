@@ -8,7 +8,8 @@ Alle noemenswaardige wijzigingen in dit project. Formaat volgens
 
 ### Toegevoegd
 - `--items NAMEN`: per resource-type kiezen welke objecten worden omgezet. `naam` geldt voor
-  alle types, `type:naam` voor één type (zelfde type-namen als bij `--fetch`); globs,
+  alle types, `type:naam` voor één type (zelfde type-namen als bij `--fetch`; het type geldt
+  ook voor de namen erna: `ilm:a,b,role:c`); globs,
   hoofdletterongevoelig, komma-gescheiden en herhaalbaar. Werkt voor alle types: templates,
   ILM, SLM, pipelines, rollen, role mappings, cluster settings, data views, connectors, rules,
   spaces en saved objects (op dashboardtitel). Exact genoemde beheerde objecten gaan ook mee.
