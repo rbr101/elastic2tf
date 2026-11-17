@@ -4,7 +4,7 @@ Alle noemenswaardige wijzigingen in dit project. Formaat volgens
 [Keep a Changelog](https://keepachangelog.com/nl/1.1.0/), versies volgens
 [Semantic Versioning](https://semver.org/).
 
-## [0.8.0] - 2026-11-17
+## [0.7.1] - 2026-11-17
 
 ### Gewijzigd
 - `var.connector_secrets` is nu `map(map(string))`: per bron-connector-ID een object met de
@@ -104,7 +104,7 @@ Eerste publieke versie.
   samenvatting.
 - Documentatie van het script in de README.
 
-[0.8.0]: https://github.com/rbr101/elastic2tf/releases/tag/v0.8.0
+[0.7.1]: https://github.com/rbr101/elastic2tf/releases/tag/v0.7.1
 [0.7.0]: https://github.com/rbr101/elastic2tf/releases/tag/v0.7.0
 [0.6.0]: https://github.com/rbr101/elastic2tf/releases/tag/v0.6.0
 [0.5.0]: https://github.com/rbr101/elastic2tf/releases/tag/v0.5.0
