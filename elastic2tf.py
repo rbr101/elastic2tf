@@ -70,10 +70,11 @@ Voorbeelden
   ./elastic2tf.py --fetch "GET _ilm/policy/mijn-policy" "GET kbn:/s/ops/api/actions/connectors" -o x.tf
   ./elastic2tf.py --fetch --items 'ingest_pipeline:logs-app,logs-web*' -o pipelines.tf
   ./elastic2tf.py -i export.txt --items 'ilm:logs-*,role:lezer,alerting_rule:CPU*' --output-dir tf/
+  ./elastic2tf.py --fetch saved_objects --tag-filter '*itoa*' --title-filter-type search -o discover.tf
   ./elastic2tf.py --list-types
 """
 
-__version__ = "0.7.1"
+__version__ = "0.8.0"
 
 import argparse
 import fnmatch
@@ -1010,15 +1011,31 @@ def saved_objects_from(doc):
     return [], False
 
 
-def filter_by_title(objs, ctx, pats):
-    """Houd dashboards waarvan de titel matcht (glob, hoofdletterongevoelig) plus alles
-    waar ze (indirect) naar verwijzen. De rest van de export valt weg."""
+def filter_by_title(objs, ctx, pats, tag_pats=()):
+    """Houd objecten van type --title-filter-type (default dashboard) waarvan de titel matcht
+    (glob, hoofdletterongevoelig) en/of die een tag hebben waarvan de naam matcht (--tag-filter),
+    plus alles waar ze (indirect) naar verwijzen. De rest van de export valt weg."""
+    rtype = ctx.args.title_filter_type
     pats = [p.lower() for p in pats]
+    tag_pats = [p.lower() for p in tag_pats]
     by_key = {(o.get("type"), o.get("id")): o for o in objs if "type" in o}
-    roots = [k for k, o in by_key.items()
-             if k[0] == ctx.args.title_filter_type
-             and any(fnmatch.fnmatchcase((o.get("attributes", {}).get("title") or "").lower(), p)
-                     for p in pats)]
+    tag_names = {k[1]: (o.get("attributes", {}).get("name") or "") for k, o in by_key.items() if k[0] == "tag"}
+
+    def title_ok(o):
+        t = (o.get("attributes", {}).get("title") or "").lower()
+        return not pats or any(fnmatch.fnmatchcase(t, p) for p in pats)
+
+    def tags_of(o):
+        return [tag_names.get(r.get("id"), "") for r in o.get("references") or [] if r.get("type") == "tag"]
+
+    def tag_ok(o):
+        return not tag_pats or any(fnmatch.fnmatchcase(n.lower(), p) for n in tags_of(o) for p in tag_pats)
+
+    roots = [k for k, o in by_key.items() if k[0] == rtype and title_ok(o) and tag_ok(o)]
+    if tag_pats and not tag_names and any(r.get("type") == "tag" for o in by_key.values()
+                                          for r in o.get("references") or []):
+        ctx.warn("--tag-filter: de tags zelf zitten niet in de response, dus tagnamen zijn onbekend. "
+                 "Gebruik _export met includeReferencesDeep (zoals --fetch doet).")
     titles = [(by_key[k].get("attributes", {}).get("title") or "").lower() for k in roots]
     ctx.item_matched.update(p for p in ctx.patterns("saved_objects")
                             if any(fnmatch.fnmatchcase(t, p.lower()) for t in titles))
@@ -1029,8 +1046,13 @@ def filter_by_title(objs, ctx, pats):
             continue
         keep.add(k)
         todo += [(r.get("type"), r.get("id")) for r in by_key[k].get("references") or []]
-    print(f"  filter op titel: {len(roots)} {ctx.args.title_filter_type}(s) gevonden, "
+    how = " en ".join(x for x, on in (("titel", pats), ("tag", tag_pats)) if on)
+    print(f"  filter op {how}: {len(roots)} {rtype}(s) gevonden, "
           f"{len(keep)} objecten inclusief referenties (van {len(by_key)})", file=sys.stderr)
+    for k in roots:
+        o = by_key[k]
+        print(f"    - {o.get('attributes', {}).get('title')}  [tags: {', '.join(n for n in tags_of(o) if n) or '-'}]",
+              file=sys.stderr)
     return [o for o in objs if (o.get("type"), o.get("id")) in keep]
 
 
@@ -1039,12 +1061,13 @@ def conv_saved_objects(doc, ctx, space):
     objs = [{k: v for k, v in o.items() if k not in SO_DROP_FIELDS}
             for o in objs if isinstance(o, dict) and not o.get("error")]
     pats = ctx.args.title_filter + ctx.patterns("saved_objects")
-    if pats:
-        objs = filter_by_title(objs, ctx, pats)
+    tag_pats = ctx.args.tag_filter
+    if pats or tag_pats:
+        objs = filter_by_title(objs, ctx, pats, tag_pats)
     real = [o for o in objs if "type" in o]
     if not real:
         ctx.warn("Saved objects: geen objecten gevonden in de response"
-                 + (" (na --title-filter/--items)" if pats else ""))
+                 + (" (na --title-filter/--tag-filter/--items)" if pats or tag_pats else ""))
         return
     if from_find:
         ids = {(o["type"], o["id"]) for o in real}
@@ -1071,10 +1094,11 @@ def conv_saved_objects(doc, ctx, space):
     types = defaultdict(int)
     for o in real:
         types[o["type"]] += 1
-    titles = [o.get("attributes", {}).get("title") for o in real if o["type"] == "dashboard"]
     comment = ", ".join(f"{v} {k}" for k, v in sorted(types.items()))
-    if titles:
-        comment += " | dashboards: " + ", ".join(t for t in titles if t)
+    for t, label in (("dashboard", "dashboards"), ("search", "discover sessions")):
+        titles = [o.get("attributes", {}).get("title") for o in real if o["type"] == t]
+        if titles:
+            comment += f" | {label}: " + ", ".join(x for x in titles if x)
     ctx.add("saved_objects.tf", "saved_objects", b, comment=comment)
 
 
@@ -1606,6 +1630,12 @@ def fetch_all(args, cp):
             args.items = [",".join(x.strip() for x in re.split(r"[,\n]+", fc.get("items")) if x.strip())]
         if fc.get("pipelines"):
             args.pipelines = [",".join(split_list(fc.get("pipelines")))]
+    if not args.tag_filter and fc.get("tag_filter"):
+        args.tag_filter = [x.strip() for x in re.split(r"[,\n]+", fc.get("tag_filter")) if x.strip()]
+    if args.title_filter_type == "dashboard" and fc.get("filter_type"):
+        args.title_filter_type = fc.get("filter_type").strip()
+    if (args.tag_filter or args.title_filter) and args.title_filter_type not in so_types:
+        so_types = ([] if not fc.get("saved_object_types") else so_types) + [args.title_filter_type]
     item_types = parse_items(args)
     if not specs and item_types and "*" not in item_types:  # alleen type:naam -> alleen die types ophalen
         specs = sorted(item_types)
@@ -2058,8 +2088,13 @@ def main():
     g.add_argument("--title-filter", action="append", default=[],
                    help="Alleen dashboards waarvan de titel matcht (glob, hoofdletterongevoelig, "
                         "herhaalbaar), bijv. 'itoa*'. Gerefereerde objecten gaan mee.")
+    g.add_argument("--tag-filter", action="append", default=[], metavar="GLOB",
+                   help="Alleen objecten met een tag waarvan de naam matcht (glob, hoofdletterongevoelig, "
+                        "herhaalbaar), bijv. '*itoa*'. Werkt op --title-filter-type; samen met "
+                        "--title-filter moeten beide matchen. Gerefereerde objecten gaan mee.")
     g.add_argument("--title-filter-type", default="dashboard",
-                   help="Type waarop --title-filter werkt (default: dashboard)")
+                   help="Type waarop --title-filter en --tag-filter werken (default: dashboard; "
+                        "discover sessions: search)")
 
     g = p.add_argument_group("alerting rules")
     g.add_argument("--all-rules", dest="obs_only", action="store_false",

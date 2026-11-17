@@ -174,6 +174,8 @@ types = ilm, index_template, elasticstack_kibana_alerting_rule
 | | `spaces` | Kibana spaces waaruit connectors, rules, data views en saved objects komen (default `default`) |
 | | `datastream_pattern` | Pattern voor data streams → data views (default `logs-*`) |
 | | `saved_object_types` | Types voor de saved objects-export (default `dashboard`) |
+| | `tag_filter` | Zoals `--tag-filter` (komma-gescheiden) |
+| | `filter_type` | Zoals `--title-filter-type`, bijv. `search` voor discover sessions |
 | | `items` | Alleen deze objecten omzetten, zoals [`--items`](#objecten-selecteren-met---items) (komma's of regels, globs). `--items` gaat voor. |
 
 Alleen de secties die nodig zijn voor de gevraagde types zijn verplicht. Bijvoorbeeld:
@@ -327,7 +329,8 @@ gerefereerde objecten (data views, visualisaties). Een `export.ndjson` uit
 | Optie | Betekenis |
 |-------|-----------|
 | `--title-filter GLOB` | Alleen dashboards waarvan de titel matcht (hoofdletterongevoelig, herhaalbaar), bijv. `'itoa*'`. Gerefereerde objecten gaan mee. |
-| `--title-filter-type TYPE` | Type waarop `--title-filter` werkt (default `dashboard`). |
+| `--tag-filter GLOB` | Alleen objecten met een tag waarvan de naam matcht (hoofdletterongevoelig, herhaalbaar), bijv. `'*itoa*'`. Werkt op `--title-filter-type`; samen met `--title-filter` moeten beide matchen. Gerefereerde objecten (data views, tags) gaan mee. |
+| `--title-filter-type TYPE` | Type waarop `--title-filter` en `--tag-filter` werken (default `dashboard`; discover sessions: `search`). |
 
 ### Alerting rules
 
@@ -378,6 +381,8 @@ gerefereerde objecten (data views, visualisaties). Een `export.ndjson` uit
 
 # Alleen dashboards waarvan de titel met "itoa" begint
 ./elastic2tf.py -i dashboards.ndjson --title-filter 'itoa*' --output-dir tf/
+# discover sessions met een tag waarin ITOA voorkomt (+ hun data views en tags)
+./elastic2tf.py --fetch saved_objects --tag-filter '*itoa*' --title-filter-type search -o discover.tf
 ```
 
 ## Output
@@ -525,6 +530,28 @@ je al deze settings echt via Terraform wilt beheren.
 Saved objects komen in een `elasticstack_kibana_import_saved_objects` resource met
 `overwrite = true`. Bij `_find`-output waarschuwt het script als gerefereerde objecten ontbreken.
 Gebruik dan liever `_export` met `includeReferencesDeep`.
+
+### Discover sessions op tag
+
+Discover sessions zijn saved objects van het type `search`. Exporteer die (met
+`includeReferencesDeep`, zodat data views en tags meekomen) en filter op tagnaam:
+
+```bash
+./elastic2tf.py --fetch saved_objects --tag-filter '*itoa*' --title-filter-type search -o discover.tf
+```
+
+of in de config:
+
+```ini
+[fetch]
+saved_object_types = search
+tag_filter = *itoa*
+filter_type = search
+```
+
+Vanuit Dev Tools: `POST kbn:/api/saved_objects/_export {"type":["search"],"includeReferencesDeep":true}`
+en het resultaat met `-i` en dezelfde opties. Een `_find`-response bevat de tags zelf niet, dus
+daar werkt `--tag-filter` niet.
 
 ## Objecten selecteren met `--items`
 

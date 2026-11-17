@@ -4,6 +4,26 @@ Alle noemenswaardige wijzigingen in dit project. Formaat volgens
 [Keep a Changelog](https://keepachangelog.com/nl/1.1.0/), versies volgens
 [Semantic Versioning](https://semver.org/).
 
+## [0.8.0] - 2026-11-17
+
+### Toegevoegd
+- `--tag-filter GLOB`: saved objects filteren op tagnaam (glob, hoofdletterongevoelig,
+  herhaalbaar), bijv. alleen discover sessions met ITOA in de tag:
+  `--fetch saved_objects --tag-filter '*itoa*' --title-filter-type search`.
+  Gerefereerde objecten (data views, tags) gaan mee; samen met `--title-filter` moeten beide matchen.
+- Config: `[fetch] tag_filter = ...` en `filter_type = ...`.
+- Met `--fetch` wordt het type van het filter (bijv. `search`) automatisch meegenomen in de
+  export; `saved_object_types` hoeft daarvoor niet aangepast te worden.
+- De gevonden objecten worden met hun tags getoond; de comment in `saved_objects.tf` noemt ook
+  discover sessions.
+
+### Gewijzigd
+- `--title-filter-type` geldt ook voor `--tag-filter`.
+
+### Let op
+- `--tag-filter` werkt alleen op `_export`-output met `includeReferencesDeep` (zoals `--fetch`
+  doet). Een `_find`-response bevat de tags zelf niet; het script waarschuwt dan.
+
 ## [0.7.1] - 2026-11-17
 
 ### Gewijzigd
