@@ -401,7 +401,8 @@ Met `--output-dir` komt elk type in een eigen bestand:
 | `connectors.tf` | action connectors |
 | `alerting_rules.tf` | alerting rules, eventueel met een `locals`-block `connector_ids` |
 | `saved_objects.tf` + `saved_objects.ndjson` | import van saved objects; de ndjson staat ernaast |
-| `variables.tf` | variabele `connector_secrets` (alleen als er connectors met secrets zijn) |
+| `variables.tf` | variabelen per connector-secret (`conn1_user`, …) + `local.connector_secrets` (alleen als er connectors met secrets zijn) |
+| `connector_secrets.tfvars.example` | placeholders voor de connector-secrets (niet bij output naar stdout) |
 | `provider.tf` | alleen met `--with-provider` |
 | `imports.tf` | alleen met `--with-imports` |
 | `moved.tf` | alleen met `--with-moved` |
@@ -629,44 +630,77 @@ overneemt in plaats van nieuwe aan te maken, gebruik dan `--with-imports`.
 
 ### Connector-secrets
 
-Kibana exporteert geen secrets (webhook-URL's, wachtwoorden, tokens). Die vul je zelf in, in de
-variabele `connector_secrets`. Het script maakt daarvoor:
+Kibana exporteert geen secrets (webhook-URL's, wachtwoorden, tokens). Het script maakt per
+connector **losse Terraform-variabelen** per secret-veld, zodat de Terraform-runner (bijv. een
+GitLab/GitHub-pipeline) ze uit CI/CD-variabelen kan vullen. Er hoeft niets met secrets in git.
 
-- `variables.tf` met de declaratie (`map(map(string))`, `sensitive`). Laat dit bestand zoals het is;
-- in `connectors.tf` per connector
-  `secrets = try(jsonencode(var.connector_secrets[<bron-connector-ID>]), null)`.
-  In de `for_each`-map staat alleen het ID (`secrets_id`): gevoelige waarden mogen niet in
-  `for_each`.
-
-Zet de waarden in een eigen bestand naast de `.tf`-bestanden, bijv.
-`connector_secrets.auto.tfvars` (wordt automatisch geladen), en zet dat **niet** in git
-(`*.auto.tfvars` in `.gitignore`):
+Voor een webhook-connector met basic auth:
 
 ```hcl
-connector_secrets = {
-  # Slack ops (.slack)
-  "11111111-1111-1111-1111-111111111111" = {
-    webhookUrl = "https://hooks.slack.com/services/T000/B000/XXXX"
-  }
+# variables.tf (gegenereerd)
+variable "conn1_user" {
+  description = "Webhook ops (.webhook, bron-ID 1111...) — user"
+  type        = string
+  sensitive   = true
+}
 
-  # Mail team (.email)
-  "22222222-2222-2222-2222-222222222222" = {
-    user     = "alerts@example.nl"
-    password = "geheim"
+variable "conn1_password" { ... }
+
+locals {
+  connector_secrets = {
+    # Webhook ops (.webhook, bron-ID 1111...)
+    "11111111-1111-1111-1111-111111111111" = {
+      user     = var.conn1_user
+      password = var.conn1_password
+    }
   }
 }
 ```
 
-- De **sleutel** is het connector-ID op het **broncluster** (staat in `connectors.tf` bij
-  `secrets_id`), ook als de connector op het doel een nieuw ID krijgt.
-- De **velden** staan in het commentaar boven elke connector (bijv. `webhookUrl` voor Slack/Teams,
-  `user`/`password` voor e-mail en webhook, `routingKey` voor PagerDuty).
-- Gebruik in een `.tfvars` geen functies zoals `jsonencode()`; dat is daar niet toegestaan. Het
-  script doet de `jsonencode()` in de `.tf`-code.
-- Geen sleutel voor een connector: dan geen secrets (`null`). Voor types die secrets nodig
-  hebben (bijv. Slack) faalt `apply` dan.
-- Zonder bestand kan het ook via een omgevingsvariabele:
-  `export TF_VAR_connector_secrets='{"<id>":{"webhookUrl":"https://..."}}'`.
+In `connectors.tf` staat per connector
+`secrets = try(jsonencode(local.connector_secrets[<bron-connector-ID>]), null)`; in de
+`for_each`-map staat alleen het ID (`secrets_id`), want gevoelige waarden mogen niet in `for_each`.
+
+**In de runner** zet je per variabele een (masked/protected) CI/CD-variabele met het voorvoegsel
+`TF_VAR_`; Terraform pakt die automatisch op:
+
+```
+TF_VAR_conn1_user      = alerts-svc
+TF_VAR_conn1_password  = ••••••••
+```
+
+Het script toont na afloop alle benodigde `TF_VAR_...`-namen en schrijft (met `-o` of
+`--output-dir`) een `connector_secrets.tfvars.example` met **placeholders** naast de output.
+Lokaal testen kan door dat bestand te kopiëren naar `connector_secrets.auto.tfvars`, de
+placeholders te vervangen en het **niet** in git te zetten (`*.auto.tfvars` in `.gitignore`).
+
+Naamgeving:
+
+- Variabelen heten `<prefix>_<veld>`, met het veld in snake_case: `conn1_user`,
+  `conn1_password`, `conn2_webhook_url` (Slack/Teams), `conn3_routing_key` (PagerDuty), enz.
+- De prefix is standaard `conn1`, `conn2`, … in de volgorde van de connectors. **Let op:** komt er
+  een connector bij of valt er een weg, dan kan de nummering verschuiven. Leg de namen daarom vast
+  in de config (`elastic2tf.ini`, ook zonder `--fetch` gelezen), op connectornaam of bron-ID:
+
+  ```ini
+  [connector_secrets]
+  Webhook ops = conn1
+  Slack team  = slack_ops
+  11111111-1111-1111-1111-111111111111 = pagerduty_prod
+  ```
+
+- `--secret-prefix PREFIX` verandert het voorvoegsel `conn` voor de automatische namen.
+- Welke velden nodig zijn volgt uit het type en de config: een webhook zonder auth
+  (`hasAuth: false`) krijgt geen variabelen, een webhook met SSL-certificaat krijgt
+  `crt`/`key`/`password` of `pfx`/`password`, xMatters zonder basic auth `secretsUrl`.
+- Een onbekend connector-type krijgt één variabele `<prefix>_secrets_json` met alle secrets als
+  JSON-object (`{"veld":"waarde"}`).
+- De variabelen hebben geen default: ontbreekt er een in de runner, dan stopt `plan` met een
+  duidelijke melding in plaats van een connector zonder secrets aan te maken.
+
+Oude vorm (t/m v0.8.2): `--connector-secrets-map` maakt weer één variabele
+`connector_secrets` (`map(map(string))`, per bron-connector-ID een object met de secret-velden),
+te vullen via een `.tfvars` of `TF_VAR_connector_secrets='{"<id>":{"webhookUrl":"https://..."}}'`.
 
 ### Overige details
 

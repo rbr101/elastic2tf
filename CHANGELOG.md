@@ -4,6 +4,27 @@ Alle noemenswaardige wijzigingen in dit project. Formaat volgens
 [Keep a Changelog](https://keepachangelog.com/nl/1.1.0/), versies volgens
 [Semantic Versioning](https://semver.org/).
 
+## [0.8.3] - 2026-11-17
+
+### Gewijzigd
+- Connector-secrets komen nu uit **losse variabelen per connector-veld** in plaats van één
+  `map(map(string))`: bijv. `conn1_user` en `conn1_password` voor een webhook met basic auth.
+  De runner vult ze met CI/CD-variabelen `TF_VAR_conn1_user`, `TF_VAR_conn1_password`.
+  `variables.tf` bevat de variabelen (`sensitive`, zonder default) en
+  `local.connector_secrets`; de connectors verwijzen naar `local.connector_secrets[<bron-ID>]`.
+  **Let op:** bestaande `connector_secrets`-tfvars omzetten, of `--connector-secrets-map` gebruiken.
+
+### Toegevoegd
+- `connector_secrets.tfvars.example` met placeholders naast de output, en na afloop een lijst
+  van de benodigde `TF_VAR_...`-namen.
+- Config-sectie `[connector_secrets]`: vaste variabele-prefix per connectornaam of bron-ID
+  (wordt ook zonder `--fetch` gelezen), zodat de namen niet verschuiven.
+- `--secret-prefix PREFIX` (default `conn`).
+- `--connector-secrets-map`: de oude vorm met `var.connector_secrets`.
+- Velden worden uit de connector-config afgeleid: webhook zonder auth krijgt geen variabelen,
+  SSL-webhook `crt`/`key`/`password` of `pfx`/`password`; onbekende types één
+  `<prefix>_secrets_json`.
+
 ## [0.8.2] - 2026-11-17
 
 ### Toegevoegd

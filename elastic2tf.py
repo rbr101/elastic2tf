@@ -52,8 +52,9 @@ Gedrag
     (logs-system.syslog-default -> data view "logs-system", pattern "logs-system*");
     "-default" aan het eind wordt weggelaten, en er komt een overkoepelende
     data view "logs-" met pattern "logs-*" bij (--catch-all / --no-catch-all).
-  - Connector-secrets worden niet geëxporteerd door Kibana; ze komen uit
-    var.connector_secrets (map per bron-connector-ID met de secret-velden), te vullen
+  - Connector-secrets worden niet geëxporteerd door Kibana; ze komen uit losse
+    variabelen per connector-veld (conn1_user, conn1_password, ...) die de runner vult
+    met TF_VAR_conn1_user enz. (of de oude map met --connector-secrets-map), te vullen
     in een *.auto.tfvars.
   - Alerting rules verwijzen automatisch naar de connector-resources als de
     connectors in dezelfde run zitten; anders via een locals-map om te mappen.
@@ -74,7 +75,7 @@ Voorbeelden
   ./elastic2tf.py --list-types
 """
 
-__version__ = "0.8.2"
+__version__ = "0.8.3"
 
 import argparse
 import fnmatch
@@ -181,9 +182,9 @@ class Block:
         return self
 
     def secret_ref(self, key, ref_id):
-        """Verwijzing naar var.connector_secrets[ref_id]. In for_each-vorm staat alleen ref_id in de
+        """Verwijzing naar local.connector_secrets[ref_id]. In for_each-vorm staat alleen ref_id in de
         map (gevoelige waarden mogen niet in for_each), de resource haalt de secrets zelf op."""
-        expr = f"try(jsonencode(var.connector_secrets[{hcl_str(ref_id)}]), null)"
+        expr = f"try(jsonencode(local.connector_secrets[{hcl_str(ref_id)}]), null)"
         self.items.append(("attr", key, expr, ("secretref", ref_id)))
         return self
 
@@ -413,6 +414,7 @@ class Ctx:
         self.connector_addr = {}             # connector-id -> tf address
         self.connector_refs = {}             # connector-id -> info (voor locals)
         self.need_secrets_var = False
+        self.secret_conns = []               # [{id, name, type, fields}] connectors met secrets
         self.item_patterns = parse_items(args)       # type ("*" = alle types) -> [patterns]
         self.item_matched, self.item_unselected = set(), defaultdict(int)
         self.rule_connectors = set()   # connector-ID's waar de geselecteerde rules naar verwijzen
@@ -918,6 +920,37 @@ SECRET_HINTS = {
     ".cases-webhook": "user, password",
 }
 NO_SECRET_TYPES = {".index", ".server-log"}
+# secret-velden per connector-type (sleutels in de Kibana-API); None = onbekend type
+SECRET_FIELDS = {
+    ".slack": ["webhookUrl"], ".slack_api": ["token"], ".email": ["user", "password"],
+    ".webhook": ["user", "password"], ".cases-webhook": ["user", "password"],
+    ".pagerduty": ["routingKey"], ".teams": ["webhookUrl"], ".opsgenie": ["apiKey"],
+    ".jira": ["email", "apiToken"], ".servicenow": ["username", "password"],
+    ".servicenow-sir": ["username", "password"], ".servicenow-itom": ["username", "password"],
+    ".xmatters": ["user", "password"], ".torq": ["token"], ".tines": ["email", "token"],
+    ".gen-ai": ["apiKey"], ".bedrock": ["accessKey", "secret"], ".d3security": ["token"],
+    ".resilient": ["apiKeyId", "apiKeySecret"], ".swimlane": ["apiToken"],
+}
+
+
+def secret_fields(ctype, config):
+    """Welke secret-velden deze connector nodig heeft, afgeleid uit type en config."""
+    config = config or {}
+    if ctype in (".webhook", ".cases-webhook"):
+        if config.get("hasAuth") is False:
+            return []
+        if config.get("authType") == "webhook-authentication-ssl":
+            return ["pfx", "password"] if config.get("certType") == "ssl-pfx" else ["crt", "key", "password"]
+    if ctype == ".xmatters" and config.get("usesBasic") is False:
+        return ["secretsUrl"]
+    if ctype == ".email" and config.get("hasAuth") is False:
+        return []
+    f = SECRET_FIELDS.get(ctype)
+    return list(f) if f is not None else None
+
+
+def snake(name):
+    return re.sub(r"[^a-z0-9_]", "_", re.sub(r"(?<=[a-z0-9])([A-Z])", r"_\1", name).lower())
 
 
 UUID_RE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$", re.I)
@@ -961,9 +994,12 @@ def conv_connector(doc, ctx, space):
             comment += (f" — bron-ID '{cid}' is geen UUID (provider vereist UUID), "
                         f"krijgt een nieuw ID; rules verwijzen naar deze resource")
         if ctype not in NO_SECRET_TYPES:
-            ctx.need_secrets_var = True
-            b.secret_ref("secrets", cid)
-            comment += f" — secrets: {SECRET_HINTS.get(ctype, 'zie Kibana connector docs')}"
+            fields = secret_fields(ctype, c.get("config"))
+            if fields != []:
+                ctx.need_secrets_var = True
+                ctx.secret_conns.append({"id": cid, "name": c.get("name"), "type": ctype, "fields": fields})
+                b.secret_ref("secrets", cid)
+                comment += f" — secrets: {SECRET_HINTS.get(ctype, 'zie Kibana connector docs')}"
         ctx.add("connectors.tf", "connector", b, comment=comment)
         ctx.imp(addr, f"{sp}/{cid}")
 
@@ -1899,7 +1935,7 @@ def template(parent: Block, schema, datas, var, used=(), hoisted=None):
         ref = f"{var}.{key}" if IDENT_RE.match(key) else f'{var}[{hcl_str(key)}]'
         if spec[0] == "attr" and spec[1] == "secretref":
             ref_id = f"{var}.{key}_id"
-            ex = f"try(jsonencode(var.connector_secrets[{ref_id}]), null)"
+            ex = f"try(jsonencode(local.connector_secrets[{ref_id}]), null)"
             parent.attr(key, ex, raw=True)
             continue
         if spec[0] == "attr":
@@ -2023,13 +2059,85 @@ provider "elasticstack" {
 }
 '''
 
-SECRETS_VAR = '''variable "connector_secrets" {
+SECRETS_VAR_MAP = '''variable "connector_secrets" {
   description = "Secrets per bron-connector-ID, bijv. { \\"<id>\\" = { webhookUrl = \\"...\\" } }"
   type        = map(map(string))
   sensitive   = true
   default     = {}
 }
+
+locals {
+  connector_secrets = var.connector_secrets
+}
 '''
+
+
+def load_secret_names(args):
+    """[connector_secrets] uit de config: connectornaam of bron-ID -> variabele-prefix."""
+    import configparser
+    paths = [args.config] if args.config else DEFAULT_CONFIG_PATHS
+    found = next((p for p in paths if p and os.path.exists(p)), None)
+    if not found:
+        return {}
+    cp = configparser.ConfigParser(inline_comment_prefixes=("#", ";"), delimiters=("=",))
+    cp.read(found, encoding="utf-8")
+    if not cp.has_section("connector_secrets"):
+        return {}
+    out = {}
+    for k, v in cp.items("connector_secrets"):
+        v = v.strip()
+        if not IDENT_RE.match(v):
+            sys.exit(f"{found} [connector_secrets]: '{v}' is geen geldige Terraform-variabelenaam")
+        out[k.strip().lower()] = v
+    return out
+
+
+def secret_vars(ctx):
+    """variables.tf met één variabele per secret-veld (conn1_user, ...) en local.connector_secrets,
+    plus een .tfvars.example met placeholders. Geeft (tf, example, [variabelenamen]) terug."""
+    names = load_secret_names(ctx.args)
+    used, n = set(names.values()), 0
+    vars_out, loc, example, allvars = [], [], [], []
+    for sc in ctx.secret_conns:
+        pfx = names.get(sc["id"].lower()) or names.get(str(sc["name"] or "").lower())
+        if not pfx or pfx in [x[0] for x in allvars]:
+            while True:
+                n += 1
+                pfx = f"{ctx.args.secret_prefix}{n}"
+                if pfx not in used:
+                    break
+        used.add(pfx)
+        fields = sc["fields"]
+        label = f"{sc['name']} ({sc['type']}, bron-ID {sc['id']})"
+        pairs = [(f, f"{pfx}_{snake(f)}") for f in fields] if fields is not None else \
+            [(None, f"{pfx}_secrets_json")]
+        allvars.append((pfx, [v for _, v in pairs]))
+        example.append(f"# {label}")
+        for f, v in pairs:
+            what = f or "alle secrets als JSON-object (onbekend connector-type)"
+            vars_out.append(f'variable "{v}" {{\n  description = {hcl_str(f"{label} — {what}")}\n'
+                            f'  type        = string\n  sensitive   = true\n}}\n')
+            example.append(f"{v} = " + (hcl_str(f"<{f}>") if f else hcl_str("{\"veld\":\"waarde\"}")))
+        example.append("")
+        loc.append(f"    # {label}")
+        if fields is None:
+            loc.append(f"    {hcl_str(sc['id'])} = jsondecode(var.{pairs[0][1]})")
+        else:
+            w = max(len(hcl_key(f)) for f, _ in pairs)
+            loc.append(f"    {hcl_str(sc['id'])} = {{")
+            loc += [f"      {hcl_key(f).ljust(w)} = var.{v}" for f, v in pairs]
+            loc.append("    }")
+    envs = [f"TF_VAR_{v}" for _, vs in allvars for v in vs]
+    tf = ("# Connector-secrets: elke variabele wordt door de Terraform-runner gevuld, bijv. met\n"
+          "# CI/CD-variabelen (masked/protected) " + ", ".join(envs[:4]) + (", ..." if len(envs) > 4 else "") +
+          ".\n# Namen aanpassen: [connector_secrets] in elastic2tf.ini (connectornaam of ID = prefix).\n\n"
+          + "\n".join(vars_out) + "\nlocals {\n  connector_secrets = {\n" + "\n".join(loc) + "\n  }\n}\n")
+    ex = ("# Placeholders voor de connector-secrets. Vervang de waarden, of (aanbevolen) zet ze als\n"
+          "# CI/CD-variabelen in de runner met het voorvoegsel TF_VAR_, bijv. TF_VAR_" +
+          (allvars[0][1][0] if allvars else "conn1_user") + ".\n"
+          "# Als .tfvars gebruiken: hernoemen naar connector_secrets.auto.tfvars en NIET in git zetten.\n\n"
+          + "\n".join(example))
+    return tf, ex, envs
 
 
 def main():
@@ -2109,6 +2217,12 @@ def main():
                         "connectors worden op ID of naam gekoppeld")
     g.add_argument("--recreate-preconfigured", action="store_true",
                    help="Preconfigured connectors van de bron als gewone connector aanmaken")
+    g.add_argument("--secret-prefix", default="conn", metavar="PREFIX",
+                   help="Voorvoegsel voor de secret-variabelen (default: conn -> conn1_user, conn1_password); "
+                        "per connector aan te passen in [connector_secrets] in de config")
+    g.add_argument("--connector-secrets-map", action="store_true",
+                   help="Oude vorm (t/m 0.8.2): één variabele connector_secrets (map(map(string))) "
+                        "i.p.v. losse variabelen per connector")
     g.add_argument("--report", help="Rapport per rule wegschrijven (.csv voor Excel, anders tekst)")
     g.add_argument("--drop-missing-actions", action="store_true",
                    help="Actions weglaten waarvan de connector niet beheerd wordt én niet op "
@@ -2205,8 +2319,14 @@ def main():
     if loc:
         files["alerting_rules.tf"] = files.get("alerting_rules.tf", header) .replace(
             header, header + "\n" + loc, 1)
+    secret_envs = []
     if ctx.need_secrets_var:
-        files["variables.tf"] = header + "\n" + SECRETS_VAR
+        if args.connector_secrets_map:
+            files["variables.tf"] = header + "\n" + SECRETS_VAR_MAP
+        else:
+            tf, ex, secret_envs = secret_vars(ctx)
+            files["variables.tf"] = header + "\n" + tf
+            ctx.extra_files["connector_secrets.tfvars.example"] = header + "\n" + ex
     if args.with_provider:
         files["provider.tf"] = header + "\n" + PROVIDER_BLOCK
     if ctx.imports:
@@ -2285,9 +2405,16 @@ def main():
         print(f"\n  {len(ctx.dropped_actions)} action(s) weggelaten (--drop-missing-actions):", file=sys.stderr)
         for rule, cid in ctx.dropped_actions:
             print(f"    - {rule}: connector {cid}", file=sys.stderr)
-    if ctx.need_secrets_var:
+    if ctx.need_secrets_var and args.connector_secrets_map:
         print("  Connector-secrets invullen via var.connector_secrets (bijv. in een *.auto.tfvars, niet in git).",
               file=sys.stderr)
+    elif ctx.need_secrets_var:
+        print(f"\n  CONNECTOR-SECRETS: {len(secret_envs)} variabele(n), te zetten in de runner (CI/CD-variabelen):",
+              file=sys.stderr)
+        for e in secret_envs:
+            print(f"    {e}", file=sys.stderr)
+        if written != "stdout":
+            print("    Placeholders: connector_secrets.tfvars.example", file=sys.stderr)
 
 
 if __name__ == "__main__":
