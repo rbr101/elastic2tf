@@ -67,11 +67,12 @@ Voorbeelden
   ./elastic2tf.py --fetch ilm index_template -o es.tf
   ./elastic2tf.py --fetch elasticstack_kibana_alerting_rule elasticstack_kibana_action_connector -o alerting.tf
   ./elastic2tf.py --fetch "GET _ilm/policy/mijn-policy" "GET kbn:/s/ops/api/actions/connectors" -o x.tf
-  ./elastic2tf.py --fetch ingest_pipeline --pipelines 'logs-app,logs-web*' -o pipelines.tf
+  ./elastic2tf.py --fetch --items 'ingest_pipeline:logs-app,logs-web*' -o pipelines.tf
+  ./elastic2tf.py -i export.txt --items 'ilm:logs-*,role:lezer,alerting_rule:CPU*' --output-dir tf/
   ./elastic2tf.py --list-types
 """
 
-__version__ = "0.5.0"
+__version__ = "0.6.0"
 
 import argparse
 import fnmatch
@@ -403,7 +404,8 @@ class Ctx:
         self.connector_addr = {}             # connector-id -> tf address
         self.connector_refs = {}             # connector-id -> info (voor locals)
         self.need_secrets_var = False
-        self.pl_matched, self.pl_unselected = set(), 0  # voor --pipelines
+        self.item_patterns = parse_items(args)       # type ("*" = alle types) -> [patterns]
+        self.item_matched, self.item_unselected = set(), defaultdict(int)
         self.source_connectors = {}          # id -> {name, type, preconfigured}
         self.target_connectors = None        # {"ids": set, "names": {name: id}}
         self.dropped_actions = []
@@ -435,6 +437,26 @@ class Ctx:
     def warn(self, msg):
         self.warnings.append(msg)
 
+    def patterns(self, kind):
+        """--items-patronen die voor dit type gelden (algemeen + specifiek)."""
+        pats = self.item_patterns.get("*", []) + self.item_patterns.get(kind, [])
+        if kind == "datastream":  # data views uit data streams vallen ook onder data_view:
+            pats += self.item_patterns.get("kibana_data_view", [])
+        return pats
+
+    def select(self, kind, *names):
+        """(geselecteerd, expliciet genoemd) volgens --items. Zonder patronen: alles, niet expliciet."""
+        pats = self.patterns(kind)
+        if not pats:
+            return True, False
+        low = [str(n).lower() for n in names if n]
+        hits = [p for p in pats if any(fnmatch.fnmatchcase(n, p.lower()) for n in low)]
+        if not hits:
+            self.item_unselected[kind] += 1
+            return False, False
+        self.item_matched.update(hits)
+        return True, any(p.lower() in low for p in hits)
+
 
 
 def is_managed(name: str, meta) -> bool:
@@ -448,7 +470,10 @@ def is_managed(name: str, meta) -> bool:
 def conv_index_template(doc, ctx, space):
     for item in doc.get("index_templates", []):
         name, t = item["name"], item["index_template"]
-        if not ctx.args.include_managed and is_managed(name, t.get("_meta")):
+        sel, explicit = ctx.select("index_template", name)
+        if not sel:
+            continue
+        if not ctx.args.include_managed and not explicit and is_managed(name, t.get("_meta")):
             ctx.skip("index_template"); continue
         rn = ctx.unique("it", name)
         b = Block(f'resource "elasticstack_elasticsearch_index_template" "{rn}"')
@@ -498,7 +523,10 @@ def render_template_block(parent: Block, tpl):
 def conv_component_template(doc, ctx, space):
     for item in doc.get("component_templates", []):
         name, t = item["name"], item["component_template"]
-        if not ctx.args.include_managed and is_managed(name, t.get("_meta")):
+        sel, explicit = ctx.select("component_template", name)
+        if not sel:
+            continue
+        if not ctx.args.include_managed and not explicit and is_managed(name, t.get("_meta")):
             ctx.skip("component_template"); continue
         rn = ctx.unique("ct", name)
         b = Block(f'resource "elasticstack_elasticsearch_component_template" "{rn}"')
@@ -531,7 +559,10 @@ ILM_ACTIONS = {
 def conv_ilm(doc, ctx, space):
     for name, body in sorted(doc.items()):
         pol = body.get("policy", {})
-        if not ctx.args.include_managed and is_managed(name, pol.get("_meta")):
+        sel, explicit = ctx.select("ilm", name)
+        if not sel:
+            continue
+        if not ctx.args.include_managed and not explicit and is_managed(name, pol.get("_meta")):
             ctx.skip("ilm"); continue
         rn = ctx.unique("ilm", name)
         b = Block(f'resource "elasticstack_elasticsearch_index_lifecycle" "{rn}"')
@@ -563,6 +594,8 @@ def conv_ilm(doc, ctx, space):
 
 def conv_slm(doc, ctx, space):
     for name, body in sorted(doc.items()):
+        if not ctx.select("slm", name)[0]:
+            continue
         pol = body.get("policy", {})
         cfg, ret = pol.get("config") or {}, pol.get("retention") or {}
         rn = ctx.unique("slm", name)
@@ -590,22 +623,31 @@ def conv_slm(doc, ctx, space):
 
 
 def name_filter(values):
-    """--pipelines a,b --pipelines 'c*' -> ['a', 'b', 'c*'] (komma's en herhalen mag)."""
+    """--items a,b --items 'c*' -> ['a', 'b', 'c*'] (komma's en herhalen mag)."""
     return [x.strip() for v in values or [] for x in v.split(",") if x.strip()]
 
 
-def conv_ingest_pipeline(doc, ctx, space):
-    wanted = name_filter(ctx.args.pipelines)
-    for name, p in sorted(doc.items()):
-        if wanted:
-            hits = [w for w in wanted if fnmatch.fnmatchcase(name, w)]
-            if not hits:
-                ctx.pl_unselected += 1
-                continue
-            ctx.pl_matched.update(hits)
-            explicit = name in wanted  # expliciet genoemd: ook als hij beheerd is
+def parse_items(args):
+    """--items (en het oude --pipelines) -> {type of '*': [patronen]}.
+    'type:patroon' geldt alleen voor dat type (type, Terraform-resource of alias zoals bij --fetch)."""
+    aliases, out = spec_aliases(), defaultdict(list)
+    for item in name_filter(getattr(args, "items", None)):
+        pre, sep, rest = item.partition(":")
+        t = aliases.get(pre.strip().lower()) if sep else None
+        if t and rest.strip():
+            out[t].append(rest.strip())
         else:
-            explicit = False
+            out["*"].append(item)
+    for item in name_filter(getattr(args, "pipelines", None)):
+        out["ingest_pipeline"].append(item)
+    return dict(out)
+
+
+def conv_ingest_pipeline(doc, ctx, space):
+    for name, p in sorted(doc.items()):
+        sel, explicit = ctx.select("ingest_pipeline", name)  # expliciet genoemd: ook als beheerd
+        if not sel:
+            continue
         if not ctx.args.include_managed and not explicit and is_managed(name, p.get("_meta")):
             ctx.skip("ingest_pipeline"); continue
         rn = ctx.unique("pl", name)
@@ -644,7 +686,10 @@ def render_index_priv(parent: Block, header: str, ip: dict, remote=False):
 def conv_role(doc, ctx, space):
     for name, r in sorted(doc.items()):
         meta = r.get("metadata") or {}
-        if not ctx.args.include_managed and (meta.get("_reserved") or meta.get("_deprecated")):
+        sel, explicit = ctx.select("role", name)
+        if not sel:
+            continue
+        if not ctx.args.include_managed and not explicit and (meta.get("_reserved") or meta.get("_deprecated")):
             ctx.skip("role"); continue
         rn = ctx.unique("role", name)
         b = Block(f'resource "elasticstack_elasticsearch_security_role" "{rn}"')
@@ -675,7 +720,10 @@ def conv_role(doc, ctx, space):
 def conv_role_mapping(doc, ctx, space):
     for name, m in sorted(doc.items()):
         meta = m.get("metadata") or {}
-        if not ctx.args.include_managed and meta.get("_reserved"):
+        sel, explicit = ctx.select("role_mapping", name)
+        if not sel:
+            continue
+        if not ctx.args.include_managed and not explicit and meta.get("_reserved"):
             ctx.skip("role_mapping"); continue
         rn = ctx.unique("rm", name)
         b = Block(f'resource "elasticstack_elasticsearch_security_role_mapping" "{rn}"')
@@ -704,6 +752,7 @@ def conv_cluster_settings(doc, ctx, space):
     for scope in ("persistent", "transient"):
         flat = {}
         flatten("", doc.get(scope) or {}, flat)
+        flat = {k: v for k, v in flat.items() if ctx.select("cluster_settings", k)[0]}
         if not flat:
             continue
         sb = b.block(scope)
@@ -758,6 +807,8 @@ def conv_datastream(doc, ctx, space):
                              "bytes": sum(s["bytes"] or 0 for s in streams if s["name"] in members)})
     sp = space or args.space_id
     for g in glist:
+        if not ctx.select("datastream", g["name"], g["pattern"])[0]:
+            continue
         if ctx.names["dv_ids"] & {g["name"]}:
             continue  # al gemaakt vanuit een andere input
         ctx.names["dv_ids"].add(g["name"])
@@ -792,6 +843,8 @@ def conv_kibana_data_view(doc, ctx, space):
         if not dv:
             continue
         did = dv.get("id")
+        if not ctx.select("kibana_data_view", did, dv.get("name"), dv.get("title"))[0]:
+            continue
         if did in ctx.names["dv_ids"]:
             continue
         ctx.names["dv_ids"].add(did)
@@ -856,9 +909,12 @@ def conv_connector(doc, ctx, space):
         cid, ctype = c["id"], c.get("connector_type_id")
         ctx.source_connectors[cid] = {"name": c.get("name"), "type": ctype,
                                       "preconfigured": bool(c.get("is_preconfigured"))}
+        sel, explicit = ctx.select("connector", c.get("name"), cid)
+        if not sel:
+            continue
         if c.get("is_system_action"):
             ctx.skip("connector"); continue
-        if c.get("is_preconfigured") and not ctx.args.recreate_preconfigured:
+        if c.get("is_preconfigured") and not (ctx.args.recreate_preconfigured or explicit):
             ctx.skip("connector"); continue
         rn = ctx.unique("conn", c.get("name") or cid, "conn")
         addr = f"elasticstack_kibana_action_connector.{rn}"
@@ -887,7 +943,10 @@ def conv_connector(doc, ctx, space):
 
 def conv_space(doc, ctx, space):
     for s in doc:
-        if s.get("_reserved"):
+        sel, explicit = ctx.select("space", s.get("id"), s.get("name"))
+        if not sel:
+            continue
+        if s.get("_reserved") and not explicit:
             ctx.skip("space"); continue
         rn = ctx.unique("space", s["id"], "space")
         b = Block(f'resource "elasticstack_kibana_space" "{rn}"')
@@ -925,15 +984,18 @@ def saved_objects_from(doc):
     return [], False
 
 
-def filter_by_title(objs, ctx):
+def filter_by_title(objs, ctx, pats):
     """Houd dashboards waarvan de titel matcht (glob, hoofdletterongevoelig) plus alles
     waar ze (indirect) naar verwijzen. De rest van de export valt weg."""
-    pats = [p.lower() for p in ctx.args.title_filter]
+    pats = [p.lower() for p in pats]
     by_key = {(o.get("type"), o.get("id")): o for o in objs if "type" in o}
     roots = [k for k, o in by_key.items()
              if k[0] == ctx.args.title_filter_type
              and any(fnmatch.fnmatchcase((o.get("attributes", {}).get("title") or "").lower(), p)
                      for p in pats)]
+    titles = [(by_key[k].get("attributes", {}).get("title") or "").lower() for k in roots]
+    ctx.item_matched.update(p for p in ctx.patterns("saved_objects")
+                            if any(fnmatch.fnmatchcase(t, p.lower()) for t in titles))
     keep, todo = set(), list(roots)
     while todo:
         k = todo.pop()
@@ -941,7 +1003,7 @@ def filter_by_title(objs, ctx):
             continue
         keep.add(k)
         todo += [(r.get("type"), r.get("id")) for r in by_key[k].get("references") or []]
-    print(f"  --title-filter: {len(roots)} {ctx.args.title_filter_type}(s) gevonden, "
+    print(f"  filter op titel: {len(roots)} {ctx.args.title_filter_type}(s) gevonden, "
           f"{len(keep)} objecten inclusief referenties (van {len(by_key)})", file=sys.stderr)
     return [o for o in objs if (o.get("type"), o.get("id")) in keep]
 
@@ -950,12 +1012,13 @@ def conv_saved_objects(doc, ctx, space):
     objs, from_find = saved_objects_from(doc)
     objs = [{k: v for k, v in o.items() if k not in SO_DROP_FIELDS}
             for o in objs if isinstance(o, dict) and not o.get("error")]
-    if ctx.args.title_filter:
-        objs = filter_by_title(objs, ctx)
+    pats = ctx.args.title_filter + ctx.patterns("saved_objects")
+    if pats:
+        objs = filter_by_title(objs, ctx, pats)
     real = [o for o in objs if "type" in o]
     if not real:
         ctx.warn("Saved objects: geen objecten gevonden in de response"
-                 + (" (na --title-filter)" if ctx.args.title_filter else ""))
+                 + (" (na --title-filter/--items)" if pats else ""))
         return
     if from_find:
         ids = {(o["type"], o["id"]) for o in real}
@@ -1004,6 +1067,8 @@ def conv_alerting_rule(doc, ctx, space):
             ctx.rule_report.append({"status": "fout", "name": "?", "id": "?", "type": "?",
                                     "reasons": [f"geen geldig rule-object ({type(r).__name__})"],
                                     "connectors": []})
+            continue
+        if not ctx.select("alerting_rule", r.get("name"), r.get("id"))[0]:
             continue
         entry = {"status": "ok", "name": r.get("name") or "(zonder naam)", "id": r.get("id") or "?",
                  "type": r.get("rule_type_id") or "?", "reasons": [], "connectors": []}
@@ -1489,12 +1554,18 @@ def fetch_all(args, cp):
     """Haalt de JSON op via de API's. Geeft [(hint, doc)] (zoals parse_console_text)."""
     fc = cp["fetch"] if cp.has_section("fetch") else {}
     specs = args.fetch or args.only or config_specs(fc.get("types"))
-    types, calls = expand_specs(specs) if specs else (list(DEFAULT_FETCH_TYPES), [])
     spaces = split_list(fc.get("spaces")) or ["default"]
     ds_pattern = fc.get("datastream_pattern") or "logs-*"
     so_types = split_list(fc.get("saved_object_types")) or ["dashboard"]
-    if not args.pipelines and fc.get("pipelines"):  # --pipelines op de commandline gaat voor
-        args.pipelines = [",".join(split_list(fc.get("pipelines")))]
+    if not args.items and not args.pipelines:  # --items op de commandline gaat voor
+        if fc.get("items"):
+            args.items = [",".join(x.strip() for x in re.split(r"[,\n]+", fc.get("items")) if x.strip())]
+        if fc.get("pipelines"):
+            args.pipelines = [",".join(split_list(fc.get("pipelines")))]
+    item_types = parse_items(args)
+    if not specs and item_types and "*" not in item_types:  # alleen type:naam -> alleen die types ophalen
+        specs = sorted(item_types)
+    types, calls = expand_specs(specs) if specs else (list(DEFAULT_FETCH_TYPES), [])
 
     # types omzetten naar calls; expand=True: data view-lijst per ID verder ophalen
     plan = []  # (method, kibana, pad, body, expand)
@@ -1907,11 +1978,13 @@ def main():
     g.add_argument("--no-catch-all", action="store_true")
     g.add_argument("--override", action="store_true", help="override = true op data views")
 
-    g = p.add_argument_group("ingest pipelines")
-    g.add_argument("--pipelines", action="append", default=[], metavar="NAMEN",
-                   help="Alleen deze ingest pipelines omzetten: komma-gescheiden namen, globs mogen "
-                        "(hoofdlettergevoelig, herhaalbaar), bijv. 'logs-app,logs-web*'. "
-                        "Expliciet genoemde pipelines worden ook omgezet als ze beheerd zijn.")
+    p.add_argument("--items", action="append", default=[], metavar="NAMEN",
+                   help="Alleen deze objecten omzetten: komma-gescheiden namen, globs mogen "
+                        "(hoofdletterongevoelig, herhaalbaar). 'naam' geldt voor alle types, "
+                        "'type:naam' alleen voor dat type, bijv. 'ilm:logs-*,ingest_pipeline:app'. "
+                        "Exact genoemde objecten gaan ook mee als ze beheerd zijn.")
+    p.add_argument("--pipelines", action="append", default=[], metavar="NAMEN",
+                   help="Verouderd: gelijk aan --items ingest_pipeline:NAMEN")
 
     g = p.add_argument_group("saved objects / dashboards")
     g.add_argument("--title-filter", action="append", default=[],
@@ -2067,13 +2140,12 @@ def main():
         print(f"  Let op: {ctx.stats['_dv_no_time'][0]} data views uit de lijst-API hebben geen tijdveld-info; "
               f"'{args.time_field}' is aangenomen. Gebruik GET kbn:/api/data_views/data_view/<id> voor exacte waarden.",
               file=sys.stderr)
-    wanted = name_filter(args.pipelines)
-    if wanted:
-        missing = [w for w in wanted if w not in ctx.pl_matched]
+    if ctx.item_patterns:
+        missing = [p for pats in ctx.item_patterns.values() for p in pats if p not in ctx.item_matched]
         if missing:
-            ctx.warn(f"--pipelines: niet gevonden in de input: {', '.join(missing)}")
-        if ctx.pl_unselected:
-            print(f"  ingest pipelines: {ctx.pl_unselected} niet geselecteerd door --pipelines", file=sys.stderr)
+            ctx.warn(f"--items: niets gevonden voor: {', '.join(dict.fromkeys(missing))}")
+        for kind, n in sorted(ctx.item_unselected.items()):
+            print(f"  {kind}: {n} niet geselecteerd door --items", file=sys.stderr)
     for w in ctx.warnings:
         print(f"  Let op: {w}", file=sys.stderr)
 

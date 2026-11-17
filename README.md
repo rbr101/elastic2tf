@@ -16,6 +16,7 @@ Vereist alleen Python 3.8+ (geen extra packages).
 - [Opties](#opties)
 - [Output](#output)
 - [Gedrag per resource-type](#gedrag-per-resource-type)
+- [Objecten selecteren met --items](#objecten-selecteren-met---items)
 - [Alerting rules en connectors](#alerting-rules-en-connectors)
 - [Bestaande objecten importeren](#bestaande-objecten-importeren)
 - [Problemen oplossen](#problemen-oplossen)
@@ -173,7 +174,7 @@ types = ilm, index_template, elasticstack_kibana_alerting_rule
 | | `spaces` | Kibana spaces waaruit connectors, rules, data views en saved objects komen (default `default`) |
 | | `datastream_pattern` | Pattern voor data streams → data views (default `logs-*`) |
 | | `saved_object_types` | Types voor de saved objects-export (default `dashboard`) |
-| | `pipelines` | Alleen deze ingest pipelines omzetten (komma's, globs). `--pipelines` gaat voor. |
+| | `items` | Alleen deze objecten omzetten, zoals [`--items`](#objecten-selecteren-met---items) (komma's of regels, globs). `--items` gaat voor. |
 
 Alleen de secties die nodig zijn voor de gevraagde types zijn verplicht. Bijvoorbeeld:
 `--only ilm` heeft alleen `[elasticsearch]` nodig.
@@ -313,11 +314,12 @@ gerefereerde objecten (data views, visualisaties). Een `export.ndjson` uit
 | `--no-catch-all` | Geen overkoepelende data view maken. |
 | `--override` | Zet `override = true` op data views uit de Kibana API. |
 
-### Ingest pipelines
+### Selectie
 
 | Optie | Betekenis |
 |-------|-----------|
-| `--pipelines NAMEN` | Alleen deze ingest pipelines omzetten: komma-gescheiden namen, globs mogen (hoofdlettergevoelig, herhaalbaar), bijv. `'logs-app,logs-web*'`. Zie [Ingest pipelines](#ingest-pipelines-1). |
+| `--items NAMEN` | Alleen deze objecten omzetten: komma-gescheiden namen, globs mogen (hoofdletterongevoelig, herhaalbaar). `naam` geldt voor alle types, `type:naam` voor één type. Zie [Objecten selecteren](#objecten-selecteren-met---items). |
+| `--pipelines NAMEN` | Verouderd; gelijk aan `--items ingest_pipeline:NAMEN`. |
 
 ### Saved objects / dashboards
 
@@ -350,7 +352,7 @@ gerefereerde objecten (data views, visualisaties). Een `export.ndjson` uit
 ./elastic2tf.py --fetch alerting_rule connector --with-imports --output-dir tf/
 
 # Alleen twee ingest pipelines omzetten
-./elastic2tf.py --fetch ingest_pipeline --pipelines logs-app,logs-web -o pipelines.tf
+./elastic2tf.py --fetch --items ingest_pipeline:logs-app,ingest_pipeline:logs-web -o pipelines.tf
 
 # Eén ILM-policy direct ophalen
 ./elastic2tf.py --fetch "GET _ilm/policy/mijn-policy" -o ilm.tf
@@ -502,27 +504,6 @@ Fasen `hot`, `warm`, `cold`, `frozen` en `delete` met de acties die de provider 
 downsample, unfollow, freeze, delete, wait_for_snapshot). Onbekende acties of velden worden
 weggelaten met een waarschuwing.
 
-### Ingest pipelines
-
-Standaard worden alle (niet-beheerde) pipelines omgezet. Met `--pipelines` kies je welke:
-
-```bash
-# uit een export
-./elastic2tf.py -i export.txt --pipelines logs-app,logs-web --output-dir tf/
-
-# direct via de API, met een glob
-./elastic2tf.py --fetch ingest_pipeline --pipelines 'logs-app,logs-web*' -o pipelines.tf
-```
-
-- Namen zijn hoofdlettergevoelig; `*` en `?` werken als wildcard (zet ze tussen quotes).
-- `--pipelines` mag meerdere keren: `--pipelines a,b --pipelines 'c*'`.
-- Een pipeline die je **exact** noemt, wordt ook omgezet als hij door Elastic of Fleet beheerd
-  wordt (bijv. `logs-system@custom`). Via een glob gaan beheerde pipelines alleen mee met
-  `--include-managed`.
-- Staat een genoemde naam niet in de input, dan volgt een waarschuwing. De samenvatting
-  toont hoeveel pipelines niet geselecteerd zijn.
-- Met `--fetch` kan de lijst ook in de config: `[fetch] pipelines = logs-app, logs-web*`.
-
 ### Security roles
 
 Cluster-, index-, remote index- en applicatierechten, `run_as`, field security en document-level
@@ -538,6 +519,50 @@ je al deze settings echt via Terraform wilt beheren.
 Saved objects komen in een `elasticstack_kibana_import_saved_objects` resource met
 `overwrite = true`. Bij `_find`-output waarschuwt het script als gerefereerde objecten ontbreken.
 Gebruik dan liever `_export` met `includeReferencesDeep`.
+
+## Objecten selecteren met `--items`
+
+Standaard worden alle (niet-beheerde) objecten omgezet. Met `--items` kies je welke, voor elk
+resource-type:
+
+```bash
+# alleen deze ingest pipelines
+./elastic2tf.py -i export.txt --items 'ingest_pipeline:logs-app,ingest_pipeline:logs-web*' -o pipelines.tf
+
+# per type iets anders
+./elastic2tf.py --fetch --items 'ilm:logs-*,role:lezer,alerting_rule:CPU*' --output-dir tf/
+
+# zonder type: geldt voor alle types (handig als je één type ophaalt)
+./elastic2tf.py --fetch ingest_pipeline --items logs-app,logs-web -o pipelines.tf
+```
+
+- **`naam`** geldt voor alle types; **`type:naam`** alleen voor dat type. Als type kun je
+  hetzelfde gebruiken als bij `--fetch`: het type (`ilm`), de Terraform-resource
+  (`elasticstack_elasticsearch_index_lifecycle`) of de korte vorm (`index_lifecycle`).
+- Types waarvoor geen `--items` gelden, worden gewoon helemaal omgezet. Met
+  `--items ilm:logs-*` worden dus alleen de ILM-policies gefilterd.
+- Namen zijn **hoofdletterongevoelig**; `*` en `?` werken als wildcard (zet ze tussen quotes).
+- Komma-gescheiden en herhaalbaar: `--items ilm:a,ilm:b --items 'role:ops-*'`.
+- Een object dat je **exact** noemt, gaat ook mee als het door Elastic of Fleet beheerd wordt
+  (bijv. `ingest_pipeline:logs-system@custom`). Via een glob gaan beheerde objecten alleen mee
+  met `--include-managed`.
+- De samenvatting toont per type hoeveel objecten niet geselecteerd zijn. Voor een naam die
+  nergens gevonden wordt, volgt een waarschuwing.
+- **Met `--fetch`**: staan er alleen `type:naam`-items en geef je achter `--fetch` niets op, dan
+  worden alleen die types opgehaald. De items kunnen ook in de config: `[fetch] items = ...`.
+
+Waarop gematcht wordt:
+
+| Type | Naam |
+|------|------|
+| `index_template`, `component_template`, `ilm`, `slm`, `ingest_pipeline`, `role`, `role_mapping` | de naam |
+| `cluster_settings` | de naam van de setting, bijv. `cluster_settings:cluster.routing.*` |
+| `datastream` (data views uit data streams) | naam of pattern van de data view, bijv. `logs-nginx` of `logs-nginx*` |
+| `kibana_data_view` / `data_view` | ID, naam of titel (geldt ook voor data views uit data streams) |
+| `connector` | naam of ID |
+| `alerting_rule` | naam of ID |
+| `space` | ID of naam |
+| `saved_objects` | titel van het dashboard (zoals `--title-filter`); gerefereerde objecten gaan mee |
 
 ## Alerting rules en connectors
 

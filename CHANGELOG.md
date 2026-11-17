@@ -4,6 +4,21 @@ Alle noemenswaardige wijzigingen in dit project. Formaat volgens
 [Keep a Changelog](https://keepachangelog.com/nl/1.1.0/), versies volgens
 [Semantic Versioning](https://semver.org/).
 
+## [0.6.0] - 2026-11-17
+
+### Toegevoegd
+- `--items NAMEN`: per resource-type kiezen welke objecten worden omgezet. `naam` geldt voor
+  alle types, `type:naam` voor één type (zelfde type-namen als bij `--fetch`); globs,
+  hoofdletterongevoelig, komma-gescheiden en herhaalbaar. Werkt voor alle types: templates,
+  ILM, SLM, pipelines, rollen, role mappings, cluster settings, data views, connectors, rules,
+  spaces en saved objects (op dashboardtitel). Exact genoemde beheerde objecten gaan ook mee.
+- Met `--fetch` en alleen `type:naam`-items worden alleen die types opgehaald.
+- Config: `[fetch] items = ...`.
+
+### Gewijzigd
+- `--pipelines` (en `[fetch] pipelines`) is verouderd en gelijk aan `--items ingest_pipeline:...`;
+  het blijft werken. Namen worden nu hoofdletterongevoelig vergeleken.
+
 ## [0.5.0] - 2026-11-17
 
 ### Toegevoegd
@@ -62,6 +77,7 @@ Eerste publieke versie.
   samenvatting.
 - Documentatie van het script in de README.
 
+[0.6.0]: https://github.com/rbr101/elastic2tf/releases/tag/v0.6.0
 [0.5.0]: https://github.com/rbr101/elastic2tf/releases/tag/v0.5.0
 [0.4.1]: https://github.com/rbr101/elastic2tf/releases/tag/v0.4.1
 [0.4.0]: https://github.com/rbr101/elastic2tf/releases/tag/v0.4.0
