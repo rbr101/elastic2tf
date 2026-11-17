@@ -74,7 +74,7 @@ Voorbeelden
   ./elastic2tf.py --list-types
 """
 
-__version__ = "0.8.0"
+__version__ = "0.8.2"
 
 import argparse
 import fnmatch

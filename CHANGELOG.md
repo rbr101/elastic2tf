@@ -4,7 +4,7 @@ Alle noemenswaardige wijzigingen in dit project. Formaat volgens
 [Keep a Changelog](https://keepachangelog.com/nl/1.1.0/), versies volgens
 [Semantic Versioning](https://semver.org/).
 
-## [0.8.0] - 2026-11-17
+## [0.8.2] - 2026-11-17
 
 ### Toegevoegd
 - `--tag-filter GLOB`: saved objects filteren op tagnaam (glob, hoofdletterongevoelig,
