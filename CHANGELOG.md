@@ -4,6 +4,13 @@ Alle noemenswaardige wijzigingen in dit project. Formaat volgens
 [Keep a Changelog](https://keepachangelog.com/nl/1.1.0/), versies volgens
 [Semantic Versioning](https://semver.org/).
 
+## [0.5.0] - 2026-11-17
+
+### Toegevoegd
+- `--pipelines NAMEN`: alleen de opgegeven ingest pipelines omzetten (komma-gescheiden, globs
+  mogen, herhaalbaar). Exact genoemde beheerde pipelines gaan ook mee; ontbrekende namen geven
+  een waarschuwing. Ook in de config: `[fetch] pipelines = ...`.
+
 ## [0.4.1] - 2026-11-17
 
 ### Gewijzigd
@@ -55,6 +62,7 @@ Eerste publieke versie.
   samenvatting.
 - Documentatie van het script in de README.
 
+[0.5.0]: https://github.com/rbr101/elastic2tf/releases/tag/v0.5.0
 [0.4.1]: https://github.com/rbr101/elastic2tf/releases/tag/v0.4.1
 [0.4.0]: https://github.com/rbr101/elastic2tf/releases/tag/v0.4.0
 [0.3.1]: https://github.com/rbr101/elastic2tf/releases/tag/v0.3.1

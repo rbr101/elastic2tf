@@ -173,6 +173,7 @@ types = ilm, index_template, elasticstack_kibana_alerting_rule
 | | `spaces` | Kibana spaces waaruit connectors, rules, data views en saved objects komen (default `default`) |
 | | `datastream_pattern` | Pattern voor data streams → data views (default `logs-*`) |
 | | `saved_object_types` | Types voor de saved objects-export (default `dashboard`) |
+| | `pipelines` | Alleen deze ingest pipelines omzetten (komma's, globs). `--pipelines` gaat voor. |
 
 Alleen de secties die nodig zijn voor de gevraagde types zijn verplicht. Bijvoorbeeld:
 `--only ilm` heeft alleen `[elasticsearch]` nodig.
@@ -312,6 +313,12 @@ gerefereerde objecten (data views, visualisaties). Een `export.ndjson` uit
 | `--no-catch-all` | Geen overkoepelende data view maken. |
 | `--override` | Zet `override = true` op data views uit de Kibana API. |
 
+### Ingest pipelines
+
+| Optie | Betekenis |
+|-------|-----------|
+| `--pipelines NAMEN` | Alleen deze ingest pipelines omzetten: komma-gescheiden namen, globs mogen (hoofdlettergevoelig, herhaalbaar), bijv. `'logs-app,logs-web*'`. Zie [Ingest pipelines](#ingest-pipelines-1). |
+
 ### Saved objects / dashboards
 
 | Optie | Betekenis |
@@ -341,6 +348,9 @@ gerefereerde objecten (data views, visualisaties). Een `export.ndjson` uit
 
 # Alleen rules en connectors ophalen, met import-blocks (cluster UUID wordt opgehaald)
 ./elastic2tf.py --fetch alerting_rule connector --with-imports --output-dir tf/
+
+# Alleen twee ingest pipelines omzetten
+./elastic2tf.py --fetch ingest_pipeline --pipelines logs-app,logs-web -o pipelines.tf
 
 # Eén ILM-policy direct ophalen
 ./elastic2tf.py --fetch "GET _ilm/policy/mijn-policy" -o ilm.tf
@@ -491,6 +501,27 @@ Fasen `hot`, `warm`, `cold`, `frozen` en `delete` met de acties die de provider 
 (rollover, set_priority, forcemerge, shrink, readonly, searchable_snapshot, allocate, migrate,
 downsample, unfollow, freeze, delete, wait_for_snapshot). Onbekende acties of velden worden
 weggelaten met een waarschuwing.
+
+### Ingest pipelines
+
+Standaard worden alle (niet-beheerde) pipelines omgezet. Met `--pipelines` kies je welke:
+
+```bash
+# uit een export
+./elastic2tf.py -i export.txt --pipelines logs-app,logs-web --output-dir tf/
+
+# direct via de API, met een glob
+./elastic2tf.py --fetch ingest_pipeline --pipelines 'logs-app,logs-web*' -o pipelines.tf
+```
+
+- Namen zijn hoofdlettergevoelig; `*` en `?` werken als wildcard (zet ze tussen quotes).
+- `--pipelines` mag meerdere keren: `--pipelines a,b --pipelines 'c*'`.
+- Een pipeline die je **exact** noemt, wordt ook omgezet als hij door Elastic of Fleet beheerd
+  wordt (bijv. `logs-system@custom`). Via een glob gaan beheerde pipelines alleen mee met
+  `--include-managed`.
+- Staat een genoemde naam niet in de input, dan volgt een waarschuwing. De samenvatting
+  toont hoeveel pipelines niet geselecteerd zijn.
+- Met `--fetch` kan de lijst ook in de config: `[fetch] pipelines = logs-app, logs-web*`.
 
 ### Security roles
 

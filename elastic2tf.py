@@ -67,10 +67,11 @@ Voorbeelden
   ./elastic2tf.py --fetch ilm index_template -o es.tf
   ./elastic2tf.py --fetch elasticstack_kibana_alerting_rule elasticstack_kibana_action_connector -o alerting.tf
   ./elastic2tf.py --fetch "GET _ilm/policy/mijn-policy" "GET kbn:/s/ops/api/actions/connectors" -o x.tf
+  ./elastic2tf.py --fetch ingest_pipeline --pipelines 'logs-app,logs-web*' -o pipelines.tf
   ./elastic2tf.py --list-types
 """
 
-__version__ = "0.4.1"
+__version__ = "0.5.0"
 
 import argparse
 import fnmatch
@@ -402,6 +403,7 @@ class Ctx:
         self.connector_addr = {}             # connector-id -> tf address
         self.connector_refs = {}             # connector-id -> info (voor locals)
         self.need_secrets_var = False
+        self.pl_matched, self.pl_unselected = set(), 0  # voor --pipelines
         self.source_connectors = {}          # id -> {name, type, preconfigured}
         self.target_connectors = None        # {"ids": set, "names": {name: id}}
         self.dropped_actions = []
@@ -432,6 +434,7 @@ class Ctx:
 
     def warn(self, msg):
         self.warnings.append(msg)
+
 
 
 def is_managed(name: str, meta) -> bool:
@@ -586,9 +589,24 @@ def conv_slm(doc, ctx, space):
         ctx.es_import(f"elasticstack_elasticsearch_snapshot_lifecycle.{rn}", name)
 
 
+def name_filter(values):
+    """--pipelines a,b --pipelines 'c*' -> ['a', 'b', 'c*'] (komma's en herhalen mag)."""
+    return [x.strip() for v in values or [] for x in v.split(",") if x.strip()]
+
+
 def conv_ingest_pipeline(doc, ctx, space):
+    wanted = name_filter(ctx.args.pipelines)
     for name, p in sorted(doc.items()):
-        if not ctx.args.include_managed and is_managed(name, p.get("_meta")):
+        if wanted:
+            hits = [w for w in wanted if fnmatch.fnmatchcase(name, w)]
+            if not hits:
+                ctx.pl_unselected += 1
+                continue
+            ctx.pl_matched.update(hits)
+            explicit = name in wanted  # expliciet genoemd: ook als hij beheerd is
+        else:
+            explicit = False
+        if not ctx.args.include_managed and not explicit and is_managed(name, p.get("_meta")):
             ctx.skip("ingest_pipeline"); continue
         rn = ctx.unique("pl", name)
         b = Block(f'resource "elasticstack_elasticsearch_ingest_pipeline" "{rn}"')
@@ -1475,6 +1493,8 @@ def fetch_all(args, cp):
     spaces = split_list(fc.get("spaces")) or ["default"]
     ds_pattern = fc.get("datastream_pattern") or "logs-*"
     so_types = split_list(fc.get("saved_object_types")) or ["dashboard"]
+    if not args.pipelines and fc.get("pipelines"):  # --pipelines op de commandline gaat voor
+        args.pipelines = [",".join(split_list(fc.get("pipelines")))]
 
     # types omzetten naar calls; expand=True: data view-lijst per ID verder ophalen
     plan = []  # (method, kibana, pad, body, expand)
@@ -1887,6 +1907,12 @@ def main():
     g.add_argument("--no-catch-all", action="store_true")
     g.add_argument("--override", action="store_true", help="override = true op data views")
 
+    g = p.add_argument_group("ingest pipelines")
+    g.add_argument("--pipelines", action="append", default=[], metavar="NAMEN",
+                   help="Alleen deze ingest pipelines omzetten: komma-gescheiden namen, globs mogen "
+                        "(hoofdlettergevoelig, herhaalbaar), bijv. 'logs-app,logs-web*'. "
+                        "Expliciet genoemde pipelines worden ook omgezet als ze beheerd zijn.")
+
     g = p.add_argument_group("saved objects / dashboards")
     g.add_argument("--title-filter", action="append", default=[],
                    help="Alleen dashboards waarvan de titel matcht (glob, hoofdletterongevoelig, "
@@ -2041,6 +2067,13 @@ def main():
         print(f"  Let op: {ctx.stats['_dv_no_time'][0]} data views uit de lijst-API hebben geen tijdveld-info; "
               f"'{args.time_field}' is aangenomen. Gebruik GET kbn:/api/data_views/data_view/<id> voor exacte waarden.",
               file=sys.stderr)
+    wanted = name_filter(args.pipelines)
+    if wanted:
+        missing = [w for w in wanted if w not in ctx.pl_matched]
+        if missing:
+            ctx.warn(f"--pipelines: niet gevonden in de input: {', '.join(missing)}")
+        if ctx.pl_unselected:
+            print(f"  ingest pipelines: {ctx.pl_unselected} niet geselecteerd door --pipelines", file=sys.stderr)
     for w in ctx.warnings:
         print(f"  Let op: {w}", file=sys.stderr)
 
