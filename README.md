@@ -334,6 +334,7 @@ gerefereerde objecten (data views, visualisaties). Een `export.ndjson` uit
 |-------|-----------|
 | `--all-rules` | Alle rules meenemen, niet alleen Observability (default: alleen Observability). |
 | `--disabled` | Rules aanmaken met `enabled = false`. |
+| `--no-rule-connectors` | Connectors van de rules niet automatisch ophalen/meenemen (zie [Connectors komen mee met de rules](#connectors-komen-mee-met-de-rules)). |
 | `--target-connectors BESTAND` | Output van `GET kbn:/api/actions/connectors` op het **doel**cluster. Connectors worden op ID of naam gekoppeld. |
 | `--recreate-preconfigured` | Preconfigured connectors van de bron als gewone connector aanmaken. |
 | `--drop-missing-actions` | Actions weglaten waarvan de connector niet beheerd wordt en niet op het doel bestaat. |
@@ -568,6 +569,33 @@ Waarop gematcht wordt:
 | `saved_objects` | titel van het dashboard (zoals `--title-filter`); gerefereerde objecten gaan mee |
 
 ## Alerting rules en connectors
+
+### Connectors komen mee met de rules
+
+Rules verwijzen naar connectors. Die connectors komen daarom automatisch mee:
+
+- **Bij `--fetch`**: worden er rules opgehaald (type `alerting_rule` of een call naar
+  `.../api/alerting/rules/...`), dan worden de connectors uit dezelfde space ook opgehaald.
+- **Bij het omzetten**: een connector waar een omgezette rule naar verwijst, wordt altijd
+  meegenomen, ook als `--items` voor connectors hem niet zou selecteren.
+- **Filter je de rules met `--items`** en de connectors niet, dan komen alleen de connectors
+  mee die de geselecteerde rules gebruiken. De samenvatting toont hoeveel connectors zijn
+  weggelaten.
+- Een preconfigured connector (uit `kibana.yml`) blijft, net als eerder, weg; gebruik
+  `--recreate-preconfigured` om hem toch aan te maken.
+
+```bash
+# rule "CPU hoog" plus de connectors die hij gebruikt
+./elastic2tf.py --fetch --items 'alerting_rule:CPU hoog' -o cpu.tf
+```
+
+Bestaan de connectors al op het doelcluster? Gebruik dan `--no-rule-connectors`: er wordt dan
+niets automatisch opgehaald of meegenomen, en de rules verwijzen via `local.connector_ids`
+naar de bestaande connectors (zie hieronder, en `--target-connectors`). Connectors die je zelf
+in de input zet, worden wel gewoon omgezet. Wil je dat Terraform bestaande connectors
+overneemt in plaats van nieuwe aan te maken, gebruik dan `--with-imports`.
+
+### Overige details
 
 - Standaard worden alleen **Observability**-rules omgezet (types `observability.*`, `logs.*`,
   `metrics.*`, `apm.*`, `slo.*`, uptime, synthetics, ML anomaly en `.es-query` met een

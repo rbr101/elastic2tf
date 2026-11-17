@@ -4,6 +4,18 @@ Alle noemenswaardige wijzigingen in dit project. Formaat volgens
 [Keep a Changelog](https://keepachangelog.com/nl/1.1.0/), versies volgens
 [Semantic Versioning](https://semver.org/).
 
+## [0.7.0] - 2026-11-17
+
+### Toegevoegd
+- Connectors komen automatisch mee met de alerting rules die ze gebruiken:
+  - `--fetch` haalt bij rules ook de connectors uit dezelfde space op;
+  - een connector waar een omgezette rule naar verwijst wordt altijd omgezet, ook als
+    `--items` hem niet selecteert;
+  - zijn de rules gefilterd met `--items` (en de connectors niet), dan komen alleen de gebruikte
+    connectors mee.
+- `--no-rule-connectors`: het oude gedrag (connectors niet automatisch meenemen; rules verwijzen
+  via `local.connector_ids` naar bestaande connectors).
+
 ## [0.6.0] - 2026-11-17
 
 ### Toegevoegd
@@ -78,6 +90,7 @@ Eerste publieke versie.
   samenvatting.
 - Documentatie van het script in de README.
 
+[0.7.0]: https://github.com/rbr101/elastic2tf/releases/tag/v0.7.0
 [0.6.0]: https://github.com/rbr101/elastic2tf/releases/tag/v0.6.0
 [0.5.0]: https://github.com/rbr101/elastic2tf/releases/tag/v0.5.0
 [0.4.1]: https://github.com/rbr101/elastic2tf/releases/tag/v0.4.1

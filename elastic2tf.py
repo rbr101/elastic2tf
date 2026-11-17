@@ -72,7 +72,7 @@ Voorbeelden
   ./elastic2tf.py --list-types
 """
 
-__version__ = "0.6.0"
+__version__ = "0.7.0"
 
 import argparse
 import fnmatch
@@ -406,6 +406,9 @@ class Ctx:
         self.need_secrets_var = False
         self.item_patterns = parse_items(args)       # type ("*" = alle types) -> [patterns]
         self.item_matched, self.item_unselected = set(), defaultdict(int)
+        self.rule_connectors = set()   # connector-ID's waar de geselecteerde rules naar verwijzen
+        self.rules_filtered = False    # rules gefilterd met --items -> alleen gebruikte connectors
+        self.conn_unused = 0
         self.source_connectors = {}          # id -> {name, type, preconfigured}
         self.target_connectors = None        # {"ids": set, "names": {name: id}}
         self.dropped_actions = []
@@ -444,13 +447,20 @@ class Ctx:
             pats += self.item_patterns.get("kibana_data_view", [])
         return pats
 
-    def select(self, kind, *names):
-        """(geselecteerd, expliciet genoemd) volgens --items. Zonder patronen: alles, niet expliciet."""
+    def matches(self, kind, *names):
+        """--items-patronen die dit object raken ([] = geen; None = geen patronen voor dit type)."""
         pats = self.patterns(kind)
         if not pats:
+            return None
+        low = [str(n).lower() for n in names if n]
+        return [p for p in pats if any(fnmatch.fnmatchcase(n, p.lower()) for n in low)]
+
+    def select(self, kind, *names):
+        """(geselecteerd, expliciet genoemd) volgens --items. Zonder patronen: alles, niet expliciet."""
+        hits = self.matches(kind, *names)
+        if hits is None:
             return True, False
         low = [str(n).lower() for n in names if n]
-        hits = [p for p in pats if any(fnmatch.fnmatchcase(n, p.lower()) for n in low)]
         if not hits:
             self.item_unselected[kind] += 1
             return False, False
@@ -910,7 +920,14 @@ def conv_connector(doc, ctx, space):
         cid, ctype = c["id"], c.get("connector_type_id")
         ctx.source_connectors[cid] = {"name": c.get("name"), "type": ctype,
                                       "preconfigured": bool(c.get("is_preconfigured"))}
-        sel, explicit = ctx.select("connector", c.get("name"), cid)
+        if cid in ctx.rule_connectors:  # een geselecteerde rule gebruikt deze connector: altijd mee
+            sel, explicit = True, bool(ctx.matches("connector", c.get("name"), cid))
+            ctx.item_matched.update(ctx.matches("connector", c.get("name"), cid) or [])
+        elif ctx.rules_filtered and ctx.matches("connector", c.get("name"), cid) is None:
+            ctx.conn_unused += 1  # rules gefilterd, connectors niet: alleen de gebruikte connectors
+            continue
+        else:
+            sel, explicit = ctx.select("connector", c.get("name"), cid)
         if not sel:
             continue
         if c.get("is_system_action"):
@@ -1202,6 +1219,24 @@ def _conv_one_rule(r, ctx, sp, entry):
 
 OBS_PREFIXES = ("observability.", "logs.", "metrics.", "apm.", "slo.", "xpack.uptime.",
                 "xpack.synthetics.", "xpack.ml.anomaly_detection_alert", "datasetQuality.")
+
+
+def scan_rule_connectors(ctx, docs):
+    """Vooraf: welke connectors gebruiken de rules die omgezet worden? Die komen altijd mee."""
+    has_rules = False
+    for doc in docs:
+        rules = doc.get("data") if isinstance(doc, dict) and "data" in doc else [doc]
+        for r in rules or []:
+            if not isinstance(r, dict):
+                continue
+            has_rules = True
+            hits = ctx.matches("alerting_rule", r.get("name"), r.get("id"))
+            if hits == [] or (ctx.args.obs_only and r.get("rule_type_id") and not is_obs_rule(r)):
+                continue
+            for act in r.get("actions") or []:
+                if isinstance(act, dict) and act.get("id"):
+                    ctx.rule_connectors.add(act["id"])
+    ctx.rules_filtered = has_rules and ctx.matches("alerting_rule", "") is not None
 
 
 def is_obs_rule(r):
@@ -1599,6 +1634,18 @@ def fetch_all(args, cp):
     # een lijst-call voor data views wordt ook per ID aangevuld (tijdveld, runtime fields)
     plan += [(m, k, pth, b, k and m == "GET" and pth.split("?")[0].rstrip("/").endswith("/api/data_views"))
              for m, k, pth, b in calls]
+
+    # rules verwijzen naar connectors: haal die uit dezelfde space mee (tenzij --no-rule-connectors)
+    if not args.no_rule_connectors:
+        have = {pth.split("?")[0] for m, k, pth, b, e in plan if k}
+        for m, k, pth, b, e in list(plan):
+            if k and re.search(r"/api/alerting/rules?(/|$)", pth):
+                pre = pth[: pth.index("/api/")]
+                cpath = pre + "/api/actions/connectors"
+                if cpath not in have:
+                    have.add(cpath)
+                    plan.append(("GET", True, cpath, None, False))
+                    print(f"  Connectors van de rules worden meegehaald: GET kbn:{cpath}", file=sys.stderr)
 
     need_kbn = any(k for _, k, _, _, _ in plan)
     need_es = any(not k for _, k, _, _, _ in plan) or (args.with_imports and not args.cluster_uuid)
@@ -1999,6 +2046,9 @@ def main():
     g.add_argument("--all-rules", dest="obs_only", action="store_false",
                    help="Niet alleen Observability rules (default: alleen Observability)")
     g.add_argument("--disabled", action="store_true", help="Rules als enabled = false")
+    g.add_argument("--no-rule-connectors", action="store_true",
+                   help="Connectors van de rules niet automatisch ophalen/meenemen (bijv. als ze al op "
+                        "het doel bestaan); rules verwijzen dan via local.connector_ids")
     g.add_argument("--raw-connector-ids", action="store_true")
     g.add_argument("--target-connectors",
                    help="Output van GET kbn:/api/actions/connectors op het DOELcluster; "
@@ -2081,6 +2131,8 @@ def main():
     ctx = Ctx(args)
     if args.target_connectors:
         ctx.target_connectors = load_target_connectors(args.target_connectors)
+    if not args.no_rule_connectors:
+        scan_rule_connectors(ctx, [doc for it, _, doc, _ in items if it == "alerting_rule"])
     for t in ORDER:
         for it, space, doc, label in items:
             if it == t:
@@ -2148,6 +2200,9 @@ def main():
             ctx.warn(f"--items: niets gevonden voor: {', '.join(dict.fromkeys(missing))}")
         for kind, n in sorted(ctx.item_unselected.items()):
             print(f"  {kind}: {n} niet geselecteerd door --items", file=sys.stderr)
+    if ctx.conn_unused:
+        print(f"  connector: {ctx.conn_unused} niet meegenomen (niet gebruikt door de geselecteerde rules)",
+              file=sys.stderr)
     for w in ctx.warnings:
         print(f"  Let op: {w}", file=sys.stderr)
 
