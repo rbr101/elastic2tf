@@ -4,6 +4,14 @@ Alle noemenswaardige wijzigingen in dit project. Formaat volgens
 [Keep a Changelog](https://keepachangelog.com/nl/1.1.0/), versies volgens
 [Semantic Versioning](https://semver.org/).
 
+## [0.4.1] - 2026-11-17
+
+### Gewijzigd
+- Compactere `for_each`-output: velden die bij alle objecten gelijk zijn staan één keer in de
+  resource; velden die uit de sleutel volgen worden `each.key` (of bijv. `"${each.key}*"`).
+  Blijft er per object niets over, dan wordt de `locals`-map een `toset([...])`-lijst. Data views
+  uit data streams zijn zo één regel per data view.
+
 ## [0.4.0] - 2026-11-16
 
 ### Gewijzigd
@@ -47,6 +55,7 @@ Eerste publieke versie.
   samenvatting.
 - Documentatie van het script in de README.
 
+[0.4.1]: https://github.com/rbr101/elastic2tf/releases/tag/v0.4.1
 [0.4.0]: https://github.com/rbr101/elastic2tf/releases/tag/v0.4.0
 [0.3.1]: https://github.com/rbr101/elastic2tf/releases/tag/v0.3.1
 [0.3.0]: https://github.com/rbr101/elastic2tf/releases/tag/v0.3.0

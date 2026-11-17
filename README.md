@@ -389,44 +389,46 @@ Met `--output-dir` komt elk type in een eigen bestand:
 ### for_each per resource-type
 
 Per resource-type maakt het script **één** resource met `for_each` over een `locals`-map. De map
-bevat per object de gegevens; de resource haalt ze op met `each.value`. Geneste blocks
-(ILM-fasen, `indices` van een rol, `actions` van een rule, …) worden `dynamic` blocks. Een
-voorbeeld met data views uit data streams:
+bevat per object alleen wat écht verschilt; de rest staat één keer in de resource:
+
+- velden die bij **alle objecten gelijk** zijn (bijv. `space_id = "default"`, `time_field_name`)
+  staan als vaste waarde in de resource;
+- velden die **uit de sleutel volgen** worden `each.key` (bijv. `name`), of een variant daarop
+  zoals `"${each.key}*"`;
+- blijft er per object niets over, dan wordt de map een lijst: `toset([...])`.
+
+Geneste blocks (ILM-fasen, `indices` van een rol, `actions` van een rule, …) worden `dynamic`
+blocks. Voorbeeld met data views uit data streams:
 
 ```hcl
 locals {
-  data_views = {
-    # logs-nginx*: 1 data stream, 2.0kb
-    "logs-nginx" = {
-      space_id  = "default"
-      data_view = {
-        id              = "logs-nginx"
-        name            = "logs-nginx"
-        title           = "logs-nginx*"
-        time_field_name = "@timestamp"
-      }
-    }
-
-    # logs-system*: 1 data stream, 1000b
-    "logs-system" = {
-      space_id  = "default"
-      data_view = {
-        id              = "logs-system"
-        name            = "logs-system"
-        title           = "logs-system*"
-        time_field_name = "@timestamp"
-      }
-    }
-  }
+  data_views = toset([
+    # logs-*: 40 data streams, 11.0tb
+    "logs-",
+    # logs-alert*: 1 data stream, 34.8mb
+    "logs-alert",
+    # logs-asset*: 3 data streams, 1.0gb
+    "logs-asset",
+  ])
 }
 
 resource "elasticstack_kibana_data_view" "data_views" {
   for_each = local.data_views
 
-  space_id  = each.value.space_id
-  data_view = each.value.data_view
+  space_id = "default"
+
+  data_view = {
+    id              = each.key
+    name            = each.key
+    title           = "${each.key}*"
+    time_field_name = "@timestamp"
+  }
 }
 ```
+
+Een nieuwe data view toevoegen is dan één regel in de lijst. Omdat gelijke waarden naar de
+resource gaan, kan de vorm veranderen als je opnieuw genereert met andere objecten; pas dus de
+input aan en genereer opnieuw, in plaats van de `.tf`-bestanden met de hand te wijzigen.
 
 - **Sleutels** in de map zijn de naam van het object (ID bij data views en spaces). Bij dubbele
   namen krijgt de volgende ` (2)` erachter. Het Terraform-adres wordt bijvoorbeeld
@@ -436,7 +438,7 @@ resource "elasticstack_kibana_data_view" "data_views" {
 - **JSON-velden** (`settings`, `mappings`, `params`, `processors`, …) staan in de map als gewone
   HCL-objecten en worden in de resource met `jsonencode()` omgezet.
 - Ook bij één object wordt `for_each` gebruikt, zodat het adres niet verandert als er later
-  objecten bijkomen.
+  objecten bijkomen. Bij één object blijven alle velden in de map staan.
 - `cluster_settings` blijft één los block (er is maar één cluster).
 - Import-blocks en verwijzingen van rules naar connectors gebruiken automatisch de nieuwe adressen.
 

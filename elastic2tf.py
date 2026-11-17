@@ -70,7 +70,7 @@ Voorbeelden
   ./elastic2tf.py --list-types
 """
 
-__version__ = "0.4.0"
+__version__ = "0.4.1"
 
 import argparse
 import fnmatch
@@ -1641,11 +1641,80 @@ def presence(datas, key):
     return all(key in d for d in datas)
 
 
-def template(parent: Block, schema, datas, var, used=()):
+def derive(values, keys, indent):
+    """Expressie voor een veld als het bij alle objecten gelijk is of uit de sleutel volgt, anders None."""
+    if len(values) < 2:
+        return None
+    if all(isinstance(v, str) and not isinstance(v, Raw) for v in values):
+        if all(v == k for v, k in zip(values, keys)):
+            return Raw("each.key")
+        k0, v0 = keys[0], values[0]
+        if v0.startswith(k0) and len(v0) > len(k0):
+            sfx = v0[len(k0):]
+            if all(v == k + sfx for v, k in zip(values, keys)):
+                return Raw('"${each.key}' + hcl_str(sfx)[1:])
+        if v0.endswith(k0) and len(v0) > len(k0):
+            pfx = v0[: -len(k0)]
+            if all(v == pfx + k for v, k in zip(values, keys)):
+                return Raw(hcl_str(pfx)[:-1] + '${each.key}"')
+    first = values[0]
+    if not isinstance(first, dict) and all(type(v) is type(first) and v == first for v in values):
+        return first if isinstance(first, Raw) else Raw(hcl_value(first, indent))
+    return None
+
+
+def hoist(schema, datas, keys):
+    """Haalt velden die gelijk zijn of uit de sleutel volgen uit de data en geeft
+    {veld: expressie} terug voor in de resource. Werkt op attributen en één niveau diep in objecten."""
+    out = {}
+    for key, spec in schema.items():
+        if spec[0] != "attr" or spec[1] not in ("val", "raw") or not presence(datas, key):
+            continue
+        values = [d[key] for d in datas]
+        expr = derive(values, keys, 1)
+        if expr is not None:
+            out[key] = expr
+            for d in datas:
+                del d[key]
+            continue
+        if not all(isinstance(v, dict) and not isinstance(v, Raw) for v in values):
+            continue
+        fields = []  # (veld, expressie)
+        names = list(dict.fromkeys(f for v in values for f in v))
+        derived = {}
+        for f in names:
+            if all(f in v for v in values):
+                e = derive([v[f] for v in values], keys, 2)
+                if e is not None:
+                    derived[f] = e
+        if not derived:
+            continue
+        ref = f"each.value.{key}" if IDENT_RE.match(key) else f"each.value[{hcl_str(key)}]"
+        for f in names:
+            if f in derived:
+                fields.append((f, str(derived[f])))
+            else:
+                r = f"{ref}.{f}" if IDENT_RE.match(f) else f"{ref}[{hcl_str(f)}]"
+                fields.append((f, r if all(f in v for v in values) else f"try({r}, null)"))
+            for v in values:
+                if f in derived:
+                    v.pop(f, None)
+        for d in datas:
+            if not d[key]:
+                del d[key]
+        w = max(len(hcl_key(f)) for f, _ in fields)
+        out[key] = Raw("{\n" + "\n".join(f"    {hcl_key(f).ljust(w)} = {e}" for f, e in fields) + "\n  }")
+    return out
+
+
+def template(parent: Block, schema, datas, var, used=(), hoisted=None):
     """Vult `parent` met attributen/dynamic blocks die naar `var` (each.value / x.value) verwijzen.
     `used`: iterator-namen van de omliggende dynamic blocks."""
     # eerst de attributen, dan de dynamic blocks
     for key, spec in sorted(schema.items(), key=lambda kv: kv[1][0] == "block"):
+        if hoisted and key in hoisted:
+            parent.attr(key, hoisted[key], raw=True)
+            continue
         always = presence(datas, key)
         ref = f"{var}.{key}" if IDENT_RE.match(key) else f'{var}[{hcl_str(key)}]'
         if spec[0] == "attr":
@@ -1694,7 +1763,7 @@ def render_for_each(entries, addr_map):
             continue
         label = FOR_EACH_LABELS[rtype]
         schema = block_schema([b for b, _ in items])
-        keys, datas, lines = set(), [], []
+        keys, datas, keylist = set(), [], []
         for b, comment in items:
             rn = HEADER_RE.match(b.header).group(2)
             name = next((m[1] for k, a, _, m in b.items if k == "attr" and a == "name" and m[0] == "val"), None)
@@ -1704,29 +1773,23 @@ def render_for_each(entries, addr_map):
                 key, i = f"{base} ({i})", i + 1
             keys.add(key)
             addr_map[f"{rtype}.{rn}"] = f"{rtype}.{label}[{hcl_str(key)}]"
-            data = block_data(b, schema)
-            datas.append(data)
-            if comment:
-                lines.append(f"    # {comment}")
-            lines.append(f"    {hcl_str(key)} = {hcl_value(data, 2)}")
-        out.append("locals {\n  " + label + " = {\n" + "\n\n".join(_join_entries(lines)) + "\n  }\n}\n")
+            keylist.append(key)
+            datas.append(block_data(b, schema))
+        hoisted = hoist(schema, datas, keylist)
+        comments = [c for _, c in items]
+        if all(not d for d in datas):  # niets per object over: alleen de sleutels
+            lines = [(f"    # {c}\n" if c else "") + f"    {hcl_str(k)}," for k, c in zip(keylist, comments)]
+            out.append("locals {\n  " + label + " = toset([\n" + "\n".join(lines) + "\n  ])\n}\n")
+        else:
+            lines = [(f"    # {c}\n" if c else "") + f"    {hcl_str(k)} = {hcl_value(d, 2)}"
+                     for k, d, c in zip(keylist, datas, comments)]
+            out.append("locals {\n  " + label + " = {\n" + "\n\n".join(lines) + "\n  }\n}\n")
         res = Block(f'resource "{rtype}" "{label}"')
         res.attr("for_each", f"local.{label}", raw=True)
         res.blank()
-        template(res, schema, datas, "each.value")
+        template(res, schema, datas, "each.value", hoisted=hoisted)
         out.append(res.render() + "\n")
     return "\n".join(out)
-
-
-def _join_entries(lines):
-    """Commentaarregel en entry bij elkaar houden; lege regel tussen entries."""
-    chunks, cur = [], []
-    for line in lines:
-        cur.append(line)
-        if not line.lstrip().startswith("#"):
-            chunks.append("\n".join(cur))
-            cur = []
-    return chunks
 
 
 def apply_addr_map(text, addr_map):
