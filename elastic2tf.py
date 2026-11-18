@@ -72,10 +72,11 @@ Voorbeelden
   ./elastic2tf.py --fetch --items 'ingest_pipeline:logs-app,logs-web*' -o pipelines.tf
   ./elastic2tf.py -i export.txt --items 'ilm:logs-*,role:lezer,alerting_rule:CPU*' --output-dir tf/
   ./elastic2tf.py --fetch saved_objects --tag-filter '*itoa*' --title-filter-type search -o discover.tf
+  ./elastic2tf.py --fetch saved_objects --saved-object-types search --output-dir tf/
   ./elastic2tf.py --list-types
 """
 
-__version__ = "0.8.3"
+__version__ = "0.8.4"
 
 import argparse
 import fnmatch
@@ -1660,7 +1661,8 @@ def fetch_all(args, cp):
     specs = args.fetch or args.only or config_specs(fc.get("types"))
     spaces = split_list(fc.get("spaces")) or ["default"]
     ds_pattern = fc.get("datastream_pattern") or "logs-*"
-    so_types = split_list(fc.get("saved_object_types")) or ["dashboard"]
+    so_cfg = ",".join(args.saved_object_types) or fc.get("saved_object_types")  # commandline gaat voor
+    so_types = split_list(so_cfg) or ["dashboard"]
     if not args.items and not args.pipelines:  # --items op de commandline gaat voor
         if fc.get("items"):
             args.items = [",".join(x.strip() for x in re.split(r"[,\n]+", fc.get("items")) if x.strip())]
@@ -1671,7 +1673,7 @@ def fetch_all(args, cp):
     if args.title_filter_type == "dashboard" and fc.get("filter_type"):
         args.title_filter_type = fc.get("filter_type").strip()
     if (args.tag_filter or args.title_filter) and args.title_filter_type not in so_types:
-        so_types = ([] if not fc.get("saved_object_types") else so_types) + [args.title_filter_type]
+        so_types = ([] if not so_cfg else so_types) + [args.title_filter_type]
     item_types = parse_items(args)
     if not specs and item_types and "*" not in item_types:  # alleen type:naam -> alleen die types ophalen
         specs = sorted(item_types)
@@ -2193,6 +2195,10 @@ def main():
                    help="Verouderd: gelijk aan --items ingest_pipeline:NAMEN")
 
     g = p.add_argument_group("saved objects / dashboards")
+    g.add_argument("--saved-object-types", action="append", default=[], metavar="TYPES",
+                   help="Types voor de saved objects-export bij --fetch (komma-gescheiden of herhaalbaar), "
+                        "bijv. 'search' of 'dashboard,search'. Gaat voor saved_object_types in de config "
+                        "(default: dashboard). Gerefereerde objecten gaan mee.")
     g.add_argument("--title-filter", action="append", default=[],
                    help="Alleen dashboards waarvan de titel matcht (glob, hoofdletterongevoelig, "
                         "herhaalbaar), bijv. 'itoa*'. Gerefereerde objecten gaan mee.")

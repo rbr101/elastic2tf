@@ -173,7 +173,7 @@ types = ilm, index_template, elasticstack_kibana_alerting_rule
 | `[fetch]` | `types` | Wat ophalen: types, Terraform-resources en/of calls (zie [Kiezen wat je ophaalt](#kiezen-wat-je-ophaalt)). Default: alles behalve `cluster_settings`. |
 | | `spaces` | Kibana spaces waaruit connectors, rules, data views en saved objects komen (default `default`) |
 | | `datastream_pattern` | Pattern voor data streams → data views (default `logs-*`) |
-| | `saved_object_types` | Types voor de saved objects-export (default `dashboard`) |
+| | `saved_object_types` | Types voor de saved objects-export (default `dashboard`). `--saved-object-types` gaat voor. |
 | | `tag_filter` | Zoals `--tag-filter` (komma-gescheiden) |
 | | `filter_type` | Zoals `--title-filter-type`, bijv. `search` voor discover sessions |
 | | `items` | Alleen deze objecten omzetten, zoals [`--items`](#objecten-selecteren-met---items) (komma's of regels, globs). `--items` gaat voor. |
@@ -328,6 +328,7 @@ gerefereerde objecten (data views, visualisaties). Een `export.ndjson` uit
 
 | Optie | Betekenis |
 |-------|-----------|
+| `--saved-object-types TYPES` | Types voor de saved objects-export bij `--fetch` (komma-gescheiden of herhaalbaar), bijv. `search` (discover sessions / saved searches) of `dashboard,search`. Gaat voor `saved_object_types` in de config; default `dashboard`. Gerefereerde objecten gaan mee. |
 | `--title-filter GLOB` | Alleen dashboards waarvan de titel matcht (hoofdletterongevoelig, herhaalbaar), bijv. `'itoa*'`. Gerefereerde objecten gaan mee. |
 | `--tag-filter GLOB` | Alleen objecten met een tag waarvan de naam matcht (hoofdletterongevoelig, herhaalbaar), bijv. `'*itoa*'`. Werkt op `--title-filter-type`; samen met `--title-filter` moeten beide matchen. Gerefereerde objecten (data views, tags) gaan mee. |
 | `--title-filter-type TYPE` | Type waarop `--title-filter` en `--tag-filter` werken (default `dashboard`; discover sessions: `search`). |
@@ -539,6 +540,12 @@ Discover sessions zijn saved objects van het type `search`. Exporteer die (met
 
 ```bash
 ./elastic2tf.py --fetch saved_objects --tag-filter '*itoa*' --title-filter-type search -o discover.tf
+```
+
+Alle discover sessions, zonder filter:
+
+```bash
+./elastic2tf.py --fetch saved_objects --saved-object-types search --output-dir tf/
 ```
 
 of in de config:

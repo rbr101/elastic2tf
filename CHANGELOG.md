@@ -4,6 +4,14 @@ Alle noemenswaardige wijzigingen in dit project. Formaat volgens
 [Keep a Changelog](https://keepachangelog.com/nl/1.1.0/), versies volgens
 [Semantic Versioning](https://semver.org/).
 
+## [0.8.4] - 2026-11-18
+
+### Toegevoegd
+- `--saved-object-types TYPES`: types voor de saved objects-export bij `--fetch` op de
+  commandline (komma-gescheiden of herhaalbaar), bijv. `--saved-object-types search` voor
+  discover sessions / saved searches of `dashboard,search`. Gaat voor `saved_object_types`
+  in de config.
+
 ## [0.8.3] - 2026-11-17
 
 ### Gewijzigd
