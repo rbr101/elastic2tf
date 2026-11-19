@@ -76,7 +76,7 @@ Voorbeelden
   ./elastic2tf.py --list-types
 """
 
-__version__ = "0.8.4"
+__version__ = "0.8.5"
 
 import argparse
 import fnmatch
@@ -839,6 +839,7 @@ def conv_datastream(doc, ctx, space):
         rn = ctx.unique("dv", g["name"], "dv")
         b = Block(f'resource "elasticstack_kibana_data_view" "{rn}"')
         b.attr("space_id", sp)
+        b.attr("override", args.override or None)
         b.key = g["name"]
         b.attr("data_view", {"id": g["name"], "name": g["name"], "title": g["pattern"],
                              "time_field_name": args.time_field})
@@ -2183,7 +2184,10 @@ def main():
     g.add_argument("--time-field", default="@timestamp")
     g.add_argument("--catch-all", default="logs-*")
     g.add_argument("--no-catch-all", action="store_true")
-    g.add_argument("--override", action="store_true", help="override = true op data views")
+    g.add_argument("--override", dest="override", action="store_true", default=True,
+                   help="override = true op data views (standaard aan)")
+    g.add_argument("--no-override", dest="override", action="store_false",
+                   help="override niet zetten op data views")
 
     p.add_argument("--items", action="append", default=[], metavar="NAMEN",
                    help="Alleen deze objecten omzetten: komma-gescheiden namen, globs mogen "

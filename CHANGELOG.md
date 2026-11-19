@@ -4,6 +4,13 @@ Alle noemenswaardige wijzigingen in dit project. Formaat volgens
 [Keep a Changelog](https://keepachangelog.com/nl/1.1.0/), versies volgens
 [Semantic Versioning](https://semver.org/).
 
+## [0.8.5] - 2026-11-19
+
+### Gewijzigd
+- `override = true` wordt nu **standaard** gezet op alle data views, ook die uit data streams
+  (voorheen alleen met `--override` en alleen op data views uit de Kibana API).
+  `--no-override` zet het uit; `--override` blijft werken maar is niet meer nodig.
+
 ## [0.8.4] - 2026-11-18
 
 ### Toegevoegd

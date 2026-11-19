@@ -315,7 +315,7 @@ gerefereerde objecten (data views, visualisaties). Een `export.ndjson` uit
 | `--time-field VELD` | Tijdveld als dat niet bekend is (default `@timestamp`). |
 | `--catch-all PATTERN` | Pattern van de overkoepelende data view (default `logs-*`). |
 | `--no-catch-all` | Geen overkoepelende data view maken. |
-| `--override` | Zet `override = true` op data views uit de Kibana API. |
+| `--no-override` | Geen `override = true` op data views. Standaard staat `override = true` op alle data views (uit de Kibana API én uit data streams). |
 
 ### Selectie
 
