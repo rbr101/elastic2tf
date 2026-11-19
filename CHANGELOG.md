@@ -4,6 +4,15 @@ Alle noemenswaardige wijzigingen in dit project. Formaat volgens
 [Keep a Changelog](https://keepachangelog.com/nl/1.1.0/), versies volgens
 [Semantic Versioning](https://semver.org/).
 
+## [0.8.6] - 2026-11-19
+
+### Opgelost
+- Component templates met een failure store (`template.data_stream_options`) gaven
+  `Unsupported block type` op oudere providers. De provider-constraint in `provider.tf` is nu
+  `>= 0.15.2, < 1.0.0` (was `~> 0.11`); bestaande lock files bijwerken met `terraform init -upgrade`.
+- `template.lifecycle` wordt niet meer geschreven bij component templates (de provider ondersteunt
+  het daar niet); er volgt een waarschuwing. Bij index templates blijft het gewoon staan.
+
 ## [0.8.5] - 2026-11-19
 
 ### Gewijzigd

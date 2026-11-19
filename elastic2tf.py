@@ -76,7 +76,7 @@ Voorbeelden
   ./elastic2tf.py --list-types
 """
 
-__version__ = "0.8.5"
+__version__ = "0.8.6"
 
 import argparse
 import fnmatch
@@ -518,7 +518,7 @@ def conv_index_template(doc, ctx, space):
         ctx.es_import(f"elasticstack_elasticsearch_index_template.{rn}", name)
 
 
-def render_template_block(parent: Block, tpl):
+def render_template_block(parent: Block, tpl, *, lifecycle=True, ctx=None, what=""):
     if not tpl:
         return
     tb = parent.block("template")
@@ -531,7 +531,12 @@ def render_template_block(parent: Block, tpl):
             ab.attr(k, cfg.get(k))
     lc = tpl.get("lifecycle") or {}
     if lc.get("data_retention"):
-        tb.block("lifecycle").attr("data_retention", lc["data_retention"])
+        if lifecycle:
+            tb.block("lifecycle").attr("data_retention", lc["data_retention"])
+        elif ctx is not None:
+            # elasticstack_elasticsearch_component_template kent geen template.lifecycle
+            ctx.warn(f"{what}: template.lifecycle (data_retention={lc['data_retention']}) wordt door de "
+                     f"provider niet ondersteund op component templates, weggelaten")
     fs = ((tpl.get("data_stream_options") or {}).get("failure_store")) or {}
     if fs:
         fsb = tb.block("data_stream_options").block("failure_store")
@@ -555,7 +560,8 @@ def conv_component_template(doc, ctx, space):
         b.attr("name", name)
         b.attr("version", t.get("version"))
         b.json("metadata", t.get("_meta"))
-        render_template_block(b, t.get("template"))
+        render_template_block(b, t.get("template"), lifecycle=False, ctx=ctx,
+                              what=f"Component template {name}")
         ctx.add("component_templates.tf", "component_template", b)
         ctx.es_import(f"elasticstack_elasticsearch_component_template.{rn}", name)
 
@@ -2051,7 +2057,7 @@ PROVIDER_BLOCK = '''terraform {
   required_providers {
     elasticstack = {
       source  = "elastic/elasticstack"
-      version = "~> 0.11"
+      version = ">= 0.15.2, < 1.0.0"
     }
   }
 }

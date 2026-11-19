@@ -7,6 +7,10 @@ data views, spaces, saved objects, …) wordt automatisch herkend.
 
 Vereist alleen Python 3.8+ (geen extra packages).
 
+De gegenereerde code vereist provider **`elastic/elasticstack` >= 0.15.2** (o.a. voor
+`template.data_stream_options` / failure store op component templates). Zit je lock file op een
+oudere versie, draai dan `terraform init -upgrade`.
+
 ## Inhoud
 
 - [Snelstart](#snelstart)
