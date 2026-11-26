@@ -4,6 +4,13 @@ Alle noemenswaardige wijzigingen in dit project. Formaat volgens
 [Keep a Changelog](https://keepachangelog.com/nl/1.1.0/), versies volgens
 [Semantic Versioning](https://semver.org/).
 
+## [0.10.0] - 2026-11-26
+
+### Toegevoegd
+- De kop van elk gegenereerd bestand bevat nu ook het gebruikte commando, de gebruiker(s)
+  waarmee is opgehaald (bij `--fetch`, met de url van Elasticsearch/Kibana) of de inputbestanden,
+  en de datum en tijd van genereren.
+
 ## [0.9.1] - 2026-11-26
 
 ### Gewijzigd
