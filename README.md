@@ -865,9 +865,19 @@ verwijderd.
 ./elastic2tf.py --version
 ```
 
-De versie staat ook bovenaan elk gegenereerd `.tf`-bestand
-(`# Gegenereerd door <scriptnaam> vX.Y.Z`) en in de samenvatting op stderr,
-zodat je altijd ziet met welke versie output gemaakt is.
+De versie staat ook bovenaan elk gegenereerd `.tf`-bestand en in de samenvatting op stderr,
+zodat je altijd ziet met welke versie output gemaakt is. De kop bevat ook het gebruikte commando,
+de gebruiker(s) waarmee is opgehaald (bij `--fetch`, met de url) of de inputbestanden, en de datum:
+
+```
+# Gegenereerd door elastic2tf.py v0.10.0 — niet handmatig aanpassen, opnieuw genereren.
+# Commando : elastic2tf.py --fetch fleet --items 'fleet_agent_policy:kafka*' -o fleet.tf
+# Opgehaald: rbraam (Kibana https://kibana.example.local:5601)
+# Datum    : 2026-11-26 10:58:05 +0100
+```
+
+Het wachtwoord staat nooit in de kop (het wordt in de terminal gevraagd). Omdat de datum bij elke
+run verandert, verschilt elk gegenereerd bestand in git minstens in die regel.
 
 Versioning volgt [Semantic Versioning](https://semver.org/):
 

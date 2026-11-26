@@ -82,7 +82,7 @@ Voorbeelden
   ./elastic2tf.py --list-types
 """
 
-__version__ = "0.9.1"
+__version__ = "0.10.0"
 
 import argparse
 import fnmatch
@@ -1982,6 +1982,7 @@ def connect(cp, need_es, need_kbn):
         user = sec["username"]
         if user not in passwords:
             passwords[user] = getpass.getpass(f"Wachtwoord voor {user} ({label} {sec['url']}): ")
+        apis.setdefault("users", []).append(f"{user} ({label} {sec['url']})")
         apis[key] = Api(label, sec["url"], user, passwords[user], make_ssl_ctx(sec),
                         sec.getfloat("timeout", fallback=60), kibana=(key == "kibana"))
     # direct controleren of inloggen lukt, zodat een typefout meteen opvalt
@@ -2170,6 +2171,7 @@ def fetch_all(args, cp):
     need_kbn = any(k for _, k, _, _, _ in plan)
     need_es = any(not k for _, k, _, _, _ in plan) or (args.with_imports and not args.cluster_uuid)
     apis = connect(cp, need_es, need_kbn)
+    args.fetch_users = apis.get("users", [])
     if args.with_imports and not args.cluster_uuid and apis.get("cluster_uuid"):
         args.cluster_uuid = apis["cluster_uuid"]
         print(f"  Cluster UUID voor import-blocks: {args.cluster_uuid}", file=sys.stderr)
@@ -2606,6 +2608,23 @@ def secret_vars(ctx):
     return tf, ex, envs
 
 
+def make_header(args):
+    """Kop boven elk gegenereerd bestand: versie, commando, fetch-gebruiker(s) en datum."""
+    import shlex
+    from datetime import datetime
+    cmd = " ".join(shlex.quote(a.replace("\n", " ")) for a in [SCRIPT_NAME] + sys.argv[1:])
+    lines = [f"# Gegenereerd door {SCRIPT_NAME} v{__version__} — niet handmatig aanpassen, opnieuw genereren.",
+             f"# Commando : {cmd}"]
+    users = getattr(args, "fetch_users", None)
+    if users:
+        lines.append(f"# Opgehaald: {users[0]}")
+        lines += [f"#            {u}" for u in users[1:]]
+    elif args.fetch is None:
+        lines.append(f"# Invoer   : {', '.join(args.input) or 'stdin'} (geen fetch)")
+    lines.append(f"# Datum    : {datetime.now().astimezone().strftime('%Y-%m-%d %H:%M:%S %z')}")
+    return "\n".join(lines) + "\n"
+
+
 def main():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("-V", "--version", action="version", version=f"%(prog)s {__version__}")
@@ -2791,7 +2810,7 @@ def main():
     fleet_finalize(ctx)
 
     # ---- output samenstellen
-    header = f"# Gegenereerd door {SCRIPT_NAME} v{__version__} — niet handmatig aanpassen, opnieuw genereren.\n"
+    header = make_header(args)
     files, addr_map = {}, {}
     for fname, entries in ctx.blocks.items():
         if args.no_for_each:
