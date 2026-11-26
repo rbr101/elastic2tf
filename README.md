@@ -3,7 +3,7 @@
 `elastic2tf.py` zet Kibana Dev Tools (Console) output om naar Terraform-code voor de
 [`elastic/elasticstack`](https://registry.terraform.io/providers/elastic/elasticstack) provider.
 Het type output (index templates, ILM, ingest pipelines, rollen, connectors, alerting rules,
-data views, spaces, saved objects, …) wordt automatisch herkend.
+data views, spaces, saved objects, Fleet agent- en integration policies, …) wordt automatisch herkend.
 
 Vereist alleen Python 3.8+ (geen extra packages).
 
@@ -22,6 +22,7 @@ oudere versie, draai dan `terraform init -upgrade`.
 - [Gedrag per resource-type](#gedrag-per-resource-type)
 - [Objecten selecteren met --items](#objecten-selecteren-met---items)
 - [Alerting rules en connectors](#alerting-rules-en-connectors)
+- [Fleet policies](#fleet-policies)
 - [Bestaande objecten importeren](#bestaande-objecten-importeren)
 - [Problemen oplossen](#problemen-oplossen)
 - [Versie](#versie)
@@ -197,6 +198,8 @@ Alleen de secties die nodig zijn voor de gevraagde types zijn verplicht. Bijvoor
 | `kibana_data_view` | `GET /api/data_views` en daarna per data view `GET /api/data_views/data_view/<id>`, per space (dus met tijdveld en runtime fields) |
 | `alerting_rule` | `GET /api/alerting/rules/_find`, per space, met paginering (alle pagina's) |
 | `saved_objects` | `POST /api/saved_objects/_export` met `includeReferencesDeep`, per space |
+| `fleet_agent_policy` | `GET /api/fleet/agent_policies`, per space, alle pagina's (alleen op verzoek; haalt ook de integration policies op) |
+| `fleet_integration_policy` | `GET /api/fleet/package_policies?format=simplified`, per space, alle pagina's (alleen op verzoek) |
 
 Voor een andere space dan `default` gaan de Kibana-calls via `/s/<space>/api/...`, en krijgen de
 resources automatisch de juiste `space_id`.
@@ -261,6 +264,9 @@ De space wordt dan automatisch uit de call overgenomen.
 | `GET kbn:/api/data_views/data_view/<id>` | `elasticstack_kibana_data_view` (met tijdveld en runtime fields) |
 | `GET kbn:/api/spaces/space` | `elasticstack_kibana_space` |
 | `POST kbn:/api/saved_objects/_export` | `elasticstack_kibana_import_saved_objects` |
+| `GET kbn:/api/fleet/agent_policies?perPage=1000` | `elasticstack_fleet_agent_policy` |
+| `GET kbn:/api/fleet/agent_policies?perPage=1000&full=true` | idem, plus de integration policies erin |
+| `GET kbn:/api/fleet/package_policies?perPage=1000&format=simplified` | `elasticstack_fleet_integration_policy` + `elasticstack_fleet_integration` |
 
 Alleen Observability-rules ophalen:
 
@@ -352,6 +358,14 @@ gerefereerde objecten (data views, visualisaties). Een `export.ndjson` uit
 | `--no-flapping` | Flapping-instellingen weglaten (voor Kibana < 8.16). |
 | `--no-artifacts` | Gekoppelde dashboards en investigation guide weglaten (voor Stack < 9.1). |
 
+### Fleet
+
+| Optie | Betekenis |
+|-------|-----------|
+| `--no-fleet-integrations` | Geen `elasticstack_fleet_integration` (package-installatie) genereren; integration policies gebruiken dan alleen de package-naam. |
+
+Zie verder [Fleet policies](#fleet-policies).
+
 ### Voorbeelden
 
 ```bash
@@ -388,6 +402,9 @@ gerefereerde objecten (data views, visualisaties). Een `export.ndjson` uit
 ./elastic2tf.py -i dashboards.ndjson --title-filter 'itoa*' --output-dir tf/
 # discover sessions met een tag waarin ITOA voorkomt (+ hun data views en tags)
 ./elastic2tf.py --fetch saved_objects --tag-filter '*itoa*' --title-filter-type search -o discover.tf
+
+# Eén Fleet agent policy met al zijn integraties
+./elastic2tf.py --fetch fleet --items 'fleet_agent_policy:Kafka consumer' -o kafka-consumer.tf
 ```
 
 ## Output
@@ -408,6 +425,10 @@ Met `--output-dir` komt elk type in een eigen bestand:
 | `saved_objects.tf` + `saved_objects.ndjson` | import van saved objects; de ndjson staat ernaast |
 | `variables.tf` | variabelen per connector-secret (`conn1_user`, …) + `local.connector_secrets` (alleen als er connectors met secrets zijn) |
 | `connector_secrets.tfvars.example` | placeholders voor de connector-secrets (niet bij output naar stdout) |
+| `fleet_agent_policies.tf` | Fleet agent policies |
+| `fleet_integration_policies.tf` | Fleet integration policies (package policies) |
+| `fleet_integrations.tf` | installatie van de gebruikte integration packages |
+| `fleet_secrets.tfvars.example` | placeholders voor secrets van integration policies (variabelen staan in `variables.tf`) |
 | `provider.tf` | alleen met `--with-provider` |
 | `imports.tf` | alleen met `--with-imports` |
 | `moved.tf` | alleen met `--with-moved` |
@@ -611,6 +632,8 @@ Waarop gematcht wordt:
 | `alerting_rule` | naam of ID |
 | `space` | ID of naam |
 | `saved_objects` | titel van het dashboard (zoals `--title-filter`); gerefereerde objecten gaan mee |
+| `fleet_agent_policy` / `agent_policy` | naam of ID; de integration policies van de agent policy gaan mee |
+| `fleet_integration_policy` / `integration_policy` | naam of ID |
 
 ## Alerting rules en connectors
 
@@ -733,12 +756,77 @@ te vullen via een `.tfvars` of `TF_VAR_connector_secrets='{"<id>":{"webhookUrl":
   ontbreekt op het doel), overgeslagen, of niet verwerkt (fout). Met `--report` gaat dat rapport
   ook naar een bestand.
 
+## Fleet policies
+
+Fleet agent policies en hun integraties (package policies) worden omgezet naar:
+
+| Fleet | Terraform resource |
+|-------|--------------------|
+| agent policy | `elasticstack_fleet_agent_policy` |
+| integration policy | `elasticstack_fleet_integration_policy` (met de `inputs`-map, provider ≥ 0.14) |
+| gebruikte package (één per naam, hoogste versie) | `elasticstack_fleet_integration` met `skip_destroy = true` |
+
+```bash
+# alle agent policies met hun integraties
+./elastic2tf.py --fetch fleet --output-dir tf/
+
+# één agent policy (naam of ID, glob mag) met al zijn integraties
+./elastic2tf.py --fetch fleet --items 'fleet_agent_policy:Kafka consumer' -o kafka-consumer.tf
+
+# alleen bepaalde integration policies
+./elastic2tf.py --fetch fleet_integration_policy --items 'integration_policy:syslog-*' -o syslog.tf
+
+# vanuit Dev Tools-output
+./elastic2tf.py -i fleet-export.txt --output-dir tf/
+```
+
+`fleet` is een verkorting voor `fleet_agent_policy` + `fleet_integration_policy`. Fleet zit
+**niet** in de standaardset van `--fetch`; je vraagt het expliciet op (in de config:
+`[fetch] types = fleet`). Bij `fleet_agent_policy` worden de integration policies altijd
+meegehaald.
+
+Gedrag:
+
+- **Selectie**: een integration policy gaat mee als zijn agent policy in dezelfde run wordt
+  omgezet. Selecteer je met `--items` alleen agent policies, dan vallen integraties van andere
+  agent policies weg. Een integratie die aan meerdere agent policies hangt krijgt
+  `agent_policy_ids`.
+- **Verwijzingen**: `agent_policy_id` verwijst naar de agent policy-resource als die in dezelfde
+  run zit, anders blijft het bron-ID staan (met een opmerking: die policy moet op het doel
+  bestaan). `integration_name` verwijst naar de `elasticstack_fleet_integration`-resource, zodat
+  het package eerst geïnstalleerd wordt. Met `--no-fleet-integrations` worden geen
+  package-resources gemaakt.
+- **Beheerde policies**: managed/preconfigured agent policies (bijv. de ECK-policies uit
+  `kibana.yml` / `xpack.fleet.agentPolicies`) en hun integraties worden overgeslagen, tenzij je
+  `--include-managed` gebruikt of de policy exact noemt in `--items`. Let op: zolang zo'n policy
+  ook nog preconfigured is in Kibana, botst dat met beheer via Terraform.
+- **Inputs**: het formaat `format=simplified` wordt gebruikt; het oude formaat (lijst van inputs,
+  bijv. uit `agent_policies?full=true`) wordt automatisch omgezet. Uitgeschakelde inputs en streams
+  komen alleen als `enabled = false` mee; vars met `null` vallen weg (de provider vult de
+  package-defaults aan).
+- **Secrets**: Fleet geeft secret-vars (bijv. een Kafka-wachtwoord) alleen als verwijzing terug.
+  Elke secret wordt een `sensitive` variabele `fleet_<policy>_<veld>` in `variables.tf`, te vullen
+  in de runner met `TF_VAR_fleet_<policy>_<veld>`; placeholders staan in
+  `fleet_secrets.tfvars.example`. Integration policies met secrets worden als losse resource
+  geschreven, omdat sensitive waarden niet in een `for_each`-map mogen.
+- **Agent policy-velden**: `monitoring_enabled` → `monitor_logs`/`monitor_metrics`, timeouts in
+  seconden → `"…s"`, `global_data_tags`, `required_versions`, `agent_features` fqdn →
+  `host_name_format = "fqdn"`, `advanced_settings` (`agent_logging_level` → `logging_level`, …) en
+  `monitoring_http`/`monitoring_diagnostics` → `advanced_monitoring_options`. Onbekende advanced
+  settings worden gemeld en weggelaten. `data_output_id`, `monitoring_output_id`,
+  `fleet_server_host_id` en `download_source_id` zijn ID's van de bron en moeten op het doel bestaan.
+- `sys_monitoring` wordt niet gezet: de system-integratie komt (als die bestaat) gewoon als
+  integration policy mee.
+- **Imports**: agent policies `<space>/<id>`, integration policies `<id>` (andere space:
+  `<space>/<id>`); geen cluster UUID nodig.
+- Benodigde rechten: Kibana-privilege **Fleet** en **Integrations** (lezen) in de opgegeven spaces.
+
 ## Bestaande objecten importeren
 
 Met `--with-imports` maakt het script `import`-blocks, zodat Terraform bestaande objecten
 overneemt in plaats van ze opnieuw aan te maken (Terraform ≥ 1.5).
 
-- Kibana-resources (data views, connectors, rules) gebruiken `<space>/<id>`.
+- Kibana-resources (data views, connectors, rules, Fleet agent policies) gebruiken `<space>/<id>`.
 - Elasticsearch-resources en spaces hebben de cluster UUID nodig: geef `--cluster-uuid` mee
   (te vinden met `GET /`, veld `cluster_uuid`). Zonder UUID worden voor deze resources geen
   import-blocks gemaakt.

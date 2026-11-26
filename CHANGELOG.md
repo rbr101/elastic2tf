@@ -4,6 +4,25 @@ Alle noemenswaardige wijzigingen in dit project. Formaat volgens
 [Keep a Changelog](https://keepachangelog.com/nl/1.1.0/), versies volgens
 [Semantic Versioning](https://semver.org/).
 
+## [0.9.0] - 2026-11-26
+
+### Toegevoegd
+- **Fleet policies**: nieuwe types `fleet_agent_policy` (`GET kbn:/api/fleet/agent_policies`)
+  → `elasticstack_fleet_agent_policy` en `fleet_integration_policy`
+  (`GET kbn:/api/fleet/package_policies?format=simplified`) → `elasticstack_fleet_integration_policy`
+  met de `inputs`-map, plus één `elasticstack_fleet_integration` (`skip_destroy = true`) per
+  gebruikt package. Ook `agent_policies?full=true` en het oude inputs-formaat worden gelezen.
+- `--fetch fleet` haalt agent- en integration policies op (per space, alle pagina's);
+  `fleet_agent_policy` haalt de integration policies automatisch mee. Fleet zit niet in de
+  standaardset van `--fetch`.
+- `--items fleet_agent_policy:<naam>`: de integraties van de gekozen agent policy gaan mee.
+- Secret-vars van integration policies worden `sensitive` variabelen `fleet_<policy>_<veld>`
+  (te vullen met `TF_VAR_...`), met `fleet_secrets.tfvars.example`; zulke policies staan als
+  losse resource (niet in de for_each-map).
+- `--no-fleet-integrations`: geen package-resources genereren.
+- Managed/preconfigured agent policies (bijv. ECK) en hun integraties worden standaard
+  overgeslagen (`--include-managed` of exact noemen in `--items` neemt ze mee).
+
 ## [0.8.6] - 2026-11-19
 
 ### Opgelost
