@@ -38,6 +38,11 @@ Kibana (prefix kbn:, voor een andere space: kbn:/s/<space-id>/api/...)
   GET kbn:/api/data_views                     -> elasticstack_kibana_data_view
   GET kbn:/api/data_views/data_view/<id>      -> elasticstack_kibana_data_view (met tijdveld, runtime fields)
   GET kbn:/api/spaces/space                   -> elasticstack_kibana_space
+  GET kbn:/api/fleet/agent_policies?perPage=1000
+                                              -> elasticstack_fleet_agent_policy
+  GET kbn:/api/fleet/package_policies?perPage=1000&format=simplified
+                                              -> elasticstack_fleet_integration_policy
+                                                 (+ elasticstack_fleet_integration per package)
   POST kbn:/api/saved_objects/_export {"objects":[{"type":"dashboard","id":"<id>"}],"includeReferencesDeep":true}
   POST kbn:/api/saved_objects/_export {"type":["dashboard"],"includeReferencesDeep":true}   (alle dashboards)
   GET  kbn:/api/saved_objects/_find?type=dashboard&per_page=1000   (zonder gerefereerde objecten!)
@@ -73,10 +78,11 @@ Voorbeelden
   ./elastic2tf.py -i export.txt --items 'ilm:logs-*,role:lezer,alerting_rule:CPU*' --output-dir tf/
   ./elastic2tf.py --fetch saved_objects --tag-filter '*itoa*' --title-filter-type search -o discover.tf
   ./elastic2tf.py --fetch saved_objects --saved-object-types search --output-dir tf/
+  ./elastic2tf.py --fetch fleet --items 'fleet_agent_policy:kafka*' --output-dir tf/
   ./elastic2tf.py --list-types
 """
 
-__version__ = "0.8.6"
+__version__ = "0.9.0"
 
 import argparse
 import fnmatch
@@ -346,6 +352,8 @@ HINT_MAP = [  # volgorde is belangrijk
     ("api/data_views", "kibana_data_view"),
     ("api/spaces/space", "space"),
     ("api/saved_objects", "saved_objects"),
+    ("api/fleet/agent_policies", "fleet_agent_policy"),
+    ("api/fleet/package_policies", "fleet_integration_policy"),
     ("api/kibana/dashboards", "saved_objects"),
 ]
 
@@ -377,6 +385,14 @@ def detect_type(hint, doc):
             return "alerting_rule"
         if "data_view" in doc:
             return "kibana_data_view"
+        fl = doc.get("items") if isinstance(doc.get("items"), list) else (
+            [doc["item"]] if isinstance(doc.get("item"), dict) else None)
+        if fl and isinstance(fl[0], dict):
+            if "package" in fl[0] and "inputs" in fl[0]:
+                return "fleet_integration_policy"
+            if "namespace" in fl[0] and ("monitoring_enabled" in fl[0] or "is_managed" in fl[0]
+                                         or "package_policies" in fl[0]):
+                return "fleet_agent_policy"
         if set(doc) & {"persistent", "transient"}:
             return "cluster_settings"
         vals = [v for v in doc.values() if isinstance(v, dict)]
@@ -425,6 +441,13 @@ class Ctx:
         self.target_connectors = None        # {"ids": set, "names": {name: id}}
         self.dropped_actions = []
         self.rule_report = []                # per rule: status, name, id, type, reasons, connectors
+        self.fleet_agent_policies = {}       # agent policy-id -> {name, managed}
+        self.fleet_policy_addr = {}          # agent policy-id -> tf-adres .policy_id
+        self.fleet_skipped_managed = set()   # overgeslagen managed agent policies
+        self.fleet_embedded_pp = []          # package_policies uit agent_policies?full=true
+        self.fleet_pp_seen = set()
+        self.fleet_packages = {}             # package-naam -> {rn, version, title}
+        self.fleet_secrets = []              # [(variabelenaam, omschrijving)]
 
     def unique(self, rtype, name, prefix="r"):
         base = tf_name(name, prefix)
@@ -1458,6 +1481,380 @@ def report_rules(ctx):
         print(f"\n  Rapport geschreven naar {path}", file=sys.stderr)
 
 
+# =========================================================================== converters (Fleet)
+
+def fleet_items(doc):
+    """Fleet-responses: {items:[...]} (lijst), {item:{...}} (één policy) of een losse policy/lijst."""
+    if isinstance(doc, list):
+        return [x for x in doc if isinstance(x, dict)]
+    if isinstance(doc, dict):
+        if isinstance(doc.get("items"), list):
+            if doc.get("total") and doc["total"] > len(doc["items"]):
+                return doc["items"], f"total={doc['total']} maar {len(doc['items'])} in response — haal ook &page=2 op"
+            return doc["items"]
+        if isinstance(doc.get("item"), dict):
+            return [doc["item"]]
+        if "namespace" in doc and "name" in doc:
+            return [doc]
+    return []
+
+
+def fleet_space_ids(obj, sp):
+    """space_ids van de API; anders alleen zetten als de space niet 'default' is (provider-default)."""
+    ids = obj.get("space_ids")
+    if isinstance(ids, list) and ids:
+        return None if ids == ["default"] else sorted(ids)
+    return None if sp in (None, "default") else [sp]
+
+
+def seconds(v):
+    return f"{int(v)}s" if isinstance(v, (int, float)) and not isinstance(v, bool) else v
+
+
+# Fleet API advanced_settings -> provider advanced_settings
+FLEET_ADV_SETTINGS = {
+    "agent_download_target_directory": "download_target_directory",
+    "agent_download_timeout": "download_timeout",
+    "agent_limits_go_max_procs": "go_max_procs",
+    "agent_logging_files_interval": "logging_files_interval",
+    "agent_logging_files_keepfiles": "logging_files_keepfiles",
+    "agent_logging_files_rotateeverybytes": "logging_files_rotateeverybytes",
+    "agent_logging_level": "logging_level",
+    "agent_logging_metrics_period": "logging_metrics_period",
+    "agent_logging_to_files": "logging_to_files",
+    "agent_monitoring_runtime_experimental": "monitoring_runtime_experimental",
+    "agent_internal": "internal",
+    "agent_features_disable_policy_change_acks_enabled": "features_disable_policy_change_acks_enabled",
+    "agent_features_include_tags_in_events_enabled": "features_include_tags_in_events_enabled",
+}
+
+
+def fleet_monitoring_options(p):
+    """monitoring_http / monitoring_pprof_enabled / monitoring_diagnostics -> advanced_monitoring_options."""
+    out = {}
+    http = p.get("monitoring_http") or {}
+    if http or p.get("monitoring_pprof_enabled") is not None:
+        h = {"enabled": http.get("enabled"), "host": http.get("host"), "port": http.get("port"),
+             "buffer_enabled": (http.get("buffer") or {}).get("enabled"),
+             "pprof_enabled": p.get("monitoring_pprof_enabled")}
+        h = {k: v for k, v in h.items() if v is not None}
+        if h:
+            out["http_monitoring_endpoint"] = h
+    diag = p.get("monitoring_diagnostics") or {}
+    d = {}
+    lim = {k: v for k, v in (diag.get("limit") or {}).items() if v is not None}
+    if lim:
+        d["rate_limits"] = {k: lim[k] for k in ("interval", "burst") if k in lim}
+    up = diag.get("uploader") or {}
+    fu = {"init_duration": up.get("init_dur"), "backoff_duration": up.get("max_dur"),
+          "max_retries": up.get("max_retries")}
+    fu = {k: v for k, v in fu.items() if v is not None}
+    if fu:
+        d["file_uploader"] = fu
+    if d:
+        out["diagnostics"] = d
+    return out or None
+
+
+def conv_fleet_agent_policy(doc, ctx, space):
+    items = fleet_items(doc)
+    if isinstance(items, tuple):
+        items, msg = items
+        ctx.warn(f"Fleet agent policies: {msg}")
+    sp = space or ctx.args.space_id
+    for p in sorted(items, key=lambda x: str(x.get("name") or "").lower()):
+        pid, name = p.get("id"), p.get("name")
+        managed = bool(p.get("is_managed") or p.get("is_preconfigured"))
+        ctx.fleet_agent_policies[pid] = {"name": name, "managed": managed}
+        if p.get("package_policies") and isinstance(p["package_policies"][0], dict):
+            ctx.fleet_embedded_pp += [dict(pp, policy_id=pp.get("policy_id") or pid)
+                                      for pp in p["package_policies"]]
+        sel, explicit = ctx.select("fleet_agent_policy", name, pid)
+        if not sel:
+            continue
+        if managed and not (ctx.args.include_managed or explicit):
+            ctx.skip("fleet_agent_policy")
+            ctx.fleet_skipped_managed.add(pid)
+            continue
+        rn = ctx.unique("fleet_agent_policy", name or pid, "fap")
+        addr = f"elasticstack_fleet_agent_policy.{rn}"
+        ctx.fleet_policy_addr[pid] = f"{addr}.policy_id"
+        b = Block(f'resource "elasticstack_fleet_agent_policy" "{rn}"')
+        if not ctx.args.no_keep_ids:
+            b.attr("policy_id", pid)
+        b.attr("name", name)
+        b.attr("namespace", p.get("namespace") or "default")
+        b.attr("description", p.get("description") or None)
+        b.attr("space_ids", fleet_space_ids(p, sp))
+        if isinstance(p.get("monitoring_enabled"), list):
+            b.attr("monitor_logs", "logs" in p["monitoring_enabled"])
+            b.attr("monitor_metrics", "metrics" in p["monitoring_enabled"])
+        for key in ("data_output_id", "monitoring_output_id", "fleet_server_host_id", "download_source_id"):
+            b.attr(key, p.get(key) or None)
+        b.attr("inactivity_timeout", seconds(p.get("inactivity_timeout")))
+        if p.get("unenroll_timeout"):
+            b.attr("unenrollment_timeout", seconds(p.get("unenroll_timeout")))
+        if p.get("is_protected"):
+            b.attr("is_protected", True)
+        if p.get("supports_agentless"):
+            b.attr("supports_agentless", True)
+        if any(f.get("name") == "fqdn" and f.get("enabled") for f in p.get("agent_features") or []):
+            b.attr("host_name_format", "fqdn")
+        tags = {}
+        for t in p.get("global_data_tags") or []:
+            v = t.get("value")
+            if t.get("name") is None or v is None:
+                continue
+            tags[t["name"]] = ({"number_value": v} if isinstance(v, (int, float)) and not isinstance(v, bool)
+                               else {"string_value": str(v)})
+        b.attr("global_data_tags", tags or None)
+        rv = {r["version"]: r.get("percentage") for r in p.get("required_versions") or [] if r.get("version")}
+        b.attr("required_versions", rv or None)
+        adv, unknown = {}, []
+        for k, v in (p.get("advanced_settings") or {}).items():
+            if v is None:
+                continue
+            if k in FLEET_ADV_SETTINGS:
+                adv[FLEET_ADV_SETTINGS[k]] = v
+            else:
+                unknown.append(k)
+        if unknown:
+            ctx.warn(f"Fleet agent policy '{name}': advanced_settings {', '.join(unknown)} niet ondersteund "
+                     f"door de provider, weggelaten")
+        b.attr("advanced_settings", adv or None)
+        b.attr("advanced_monitoring_options", fleet_monitoring_options(p))
+        comment = name + (" (Fleet Server policy)" if p.get("has_fleet_server") else "")
+        if managed:
+            comment += " — was managed/preconfigured op de bron"
+        outs = [k for k in ("data_output_id", "monitoring_output_id", "fleet_server_host_id",
+                            "download_source_id") if p.get(k)]
+        if outs:
+            comment += f" — {', '.join(outs)} moeten op het doel bestaan"
+        ctx.add("fleet_agent_policies.tf", "fleet_agent_policy", b, comment=comment)
+        ctx.imp(addr, f"{(fleet_space_ids(p, sp) or ['default'])[0]}/{pid}")
+
+
+def legacy_vars(v):
+    """Fleet 'legacy' vars {naam: {type, value}} -> {naam: value}."""
+    if not isinstance(v, dict):
+        return {}
+    return {k: (x.get("value") if isinstance(x, dict) and ("value" in x or "type" in x) else x)
+            for k, x in v.items()}
+
+
+def simplify_inputs(inputs):
+    """Legacy inputs (lijst) -> simplified vorm {"<policy_template>-<type>": {enabled, vars, streams}}."""
+    if isinstance(inputs, dict):
+        return inputs
+    out = {}
+    for i in inputs or []:
+        key = f"{i['policy_template']}-{i['type']}" if i.get("policy_template") else i.get("type")
+        streams = {}
+        for s in i.get("streams") or []:
+            ds = (s.get("data_stream") or {}).get("dataset") or s.get("id")
+            streams[ds] = {"enabled": s.get("enabled", True), "vars": legacy_vars(s.get("vars"))}
+        out[key] = {"enabled": i.get("enabled", True), "vars": legacy_vars(i.get("vars")), "streams": streams}
+    return out
+
+
+def clean_fleet_inputs(inputs, on_secret):
+    """Alleen wat de provider nodig heeft; uitgeschakelde inputs/streams alleen als enabled = false.
+    None-vars vallen weg (provider vult package-defaults aan); secret-refs via on_secret(pad)."""
+    def clean_vars(vars_, path):
+        out = {}
+        for k, v in (vars_ or {}).items():
+            if v is None:
+                continue
+            if isinstance(v, dict) and v.get("isSecretRef"):
+                v = on_secret(f"{path}.{k}")
+            out[k] = v
+        return out
+
+    res = {}
+    for ik, inp in (inputs or {}).items():
+        if not isinstance(inp, dict):
+            continue
+        if inp.get("enabled") is False:
+            res[ik] = {"enabled": False}
+            continue
+        o = {"enabled": True}
+        if inp.get("condition"):
+            o["condition"] = inp["condition"]
+        v = clean_vars(inp.get("vars"), ik)
+        if v:
+            o["vars"] = v
+        streams = {}
+        for sk, s in (inp.get("streams") or {}).items():
+            if not isinstance(s, dict):
+                continue
+            if s.get("enabled") is False:
+                streams[sk] = {"enabled": False}
+                continue
+            so = {"enabled": True}
+            if s.get("condition"):
+                so["condition"] = s["condition"]
+            sv = clean_vars(s.get("vars"), f"{ik}.{sk}")
+            if sv:
+                so["vars"] = sv
+            streams[sk] = so
+        if streams:
+            o["streams"] = streams
+        res[ik] = o
+    return res
+
+
+def render_fleet_inputs(inputs, level):
+    """inputs als HCL-object met jsonencode() voor de vars (losse resource, niet for_each)."""
+    def conv(o, lvl):
+        out = {k: v for k, v in o.items() if k not in ("vars", "streams")}
+        if "vars" in o:
+            out["vars"] = Raw(jsonenc(o["vars"], lvl))
+        if "streams" in o:
+            out["streams"] = {sk: conv(s, lvl + 2) for sk, s in o["streams"].items()}
+        return out
+    return hcl_value({k: conv(v, level + 2) for k, v in inputs.items()}, level)
+
+
+FLEET_INPUTS_EXPR = """{{
+    for k, v in {ref} : k => {{
+      enabled   = try(v.enabled, null)
+      condition = try(v.condition, null)
+      vars      = try(jsonencode(v.vars), null)
+      streams = try({{
+        for sk, sv in v.streams : sk => {{
+          enabled   = try(sv.enabled, null)
+          condition = try(sv.condition, null)
+          vars      = try(jsonencode(sv.vars), null)
+        }}
+      }}, null)
+    }}
+  }}"""
+
+
+def pkg_version_key(v):
+    return tuple(int(x) if x.isdigit() else 0 for x in re.split(r"[.\-+]", str(v or "0")))
+
+
+def conv_fleet_integration_policy(doc, ctx, space):
+    items = fleet_items(doc)
+    if isinstance(items, tuple):
+        items, msg = items
+        ctx.warn(f"Fleet integration policies: {msg}")
+    sp = space or ctx.args.space_id
+    agent_pats = ctx.patterns("fleet_agent_policy")
+    own_pats = ctx.item_patterns.get("fleet_integration_policy")
+    for p in sorted(items, key=lambda x: str(x.get("name") or "").lower()):
+        pid, name = p.get("id"), p.get("name")
+        if pid in ctx.fleet_pp_seen:
+            continue
+        ctx.fleet_pp_seen.add(pid)
+        parents = p.get("policy_ids") or ([p["policy_id"]] if p.get("policy_id") else [])
+        converted = [x for x in parents if x in ctx.fleet_policy_addr]
+        hits = ctx.matches("fleet_integration_policy", name, pid)
+        if converted:   # hoort bij een agent policy in deze run: gaat altijd mee
+            sel, explicit = True, bool(hits)
+            ctx.item_matched.update(hits or [])
+        elif agent_pats and not own_pats and not hits:
+            ctx.item_unselected["fleet_integration_policy"] += 1
+            continue
+        else:
+            sel, explicit = ctx.select("fleet_integration_policy", name, pid)
+        if not sel:
+            continue
+        managed = p.get("is_managed") or any(x in ctx.fleet_skipped_managed for x in parents)
+        if managed and not converted and not (ctx.args.include_managed or explicit):
+            ctx.skip("fleet_integration_policy"); continue
+        pkg = p.get("package") or {}
+        if not pkg.get("name"):
+            ctx.warn(f"Fleet integration policy '{name}': geen package-info, overgeslagen")
+            ctx.skip("fleet_integration_policy"); continue
+        rn = ctx.unique("fleet_integration_policy", name or pid, "fip")
+        addr = f"elasticstack_fleet_integration_policy.{rn}"
+        secrets = []
+
+        def on_secret(path, _name=name, _secrets=secrets):
+            var = ctx.unique("fleet_secret_var", f"fleet_{_name}_{path.rsplit('.', 1)[-1]}", "fleet")
+            _secrets.append(var)
+            ctx.fleet_secrets.append((var, f"{_name} — {path}"))
+            return Raw(f"var.{var}")
+
+        inputs = clean_fleet_inputs(simplify_inputs(p.get("inputs")), on_secret)
+        pvars = {}
+        for k, v in (legacy_vars(p.get("vars")) if not isinstance(p.get("inputs"), dict)
+                     else (p.get("vars") or {})).items():
+            if v is None:
+                continue
+            pvars[k] = on_secret(k) if isinstance(v, dict) and v.get("isSecretRef") else v
+
+        b = Block(f'resource "elasticstack_fleet_integration_policy" "{rn}"')
+        if not ctx.args.no_keep_ids:
+            b.attr("policy_id", pid)
+        b.attr("name", name)
+        b.attr("namespace", p.get("namespace") or "default")
+        b.attr("description", p.get("description") or None)
+        refs = [Raw(ctx.fleet_policy_addr[x]) if x in ctx.fleet_policy_addr else x for x in parents]
+        if len(refs) == 1:
+            b.attr("agent_policy_id", refs[0], raw=isinstance(refs[0], Raw))
+        elif refs:
+            b.attr("agent_policy_ids", refs)
+        b.attr("space_ids", fleet_space_ids(p, sp))
+        b.attr("output_id", p.get("output_id") or None)
+        if ctx.args.no_fleet_integrations:
+            b.attr("integration_name", pkg["name"])
+        else:
+            info = ctx.fleet_packages.setdefault(pkg["name"], {
+                "rn": ctx.unique("elasticstack_fleet_integration", pkg["name"], "pkg"), "version": None,
+                "title": pkg.get("title")})
+            if pkg_version_key(pkg.get("version")) > pkg_version_key(info["version"]):
+                info["version"] = pkg.get("version")
+            b.attr("integration_name", f"elasticstack_fleet_integration.{info['rn']}.name", raw=True)
+        b.attr("integration_version", pkg.get("version"))
+        if p.get("additional_datastreams_permissions"):
+            b.attr("additional_datastreams_permissions", p["additional_datastreams_permissions"])
+        b.json("vars_json", pvars or None)
+        if inputs:
+            rendered = render_fleet_inputs(inputs, b.indent + 1)
+            b.items.append(("attr", "inputs", rendered, ("fleetinputs", inputs)))
+        b.single = bool(secrets)  # secrets (sensitive) mogen niet in een for_each-map
+        missing = [x for x in parents if x not in ctx.fleet_policy_addr]
+        comment = f"{name} ({pkg.get('title') or pkg['name']} {pkg.get('version') or ''})".replace(" )", ")")
+        if missing:
+            comment += (f" — agent policy {', '.join(missing)} zit niet in deze run "
+                        f"en moet op het doel bestaan")
+        if secrets:
+            comment += f" — secrets via {', '.join('var.' + s for s in secrets)}"
+        ctx.add("fleet_integration_policies.tf", "fleet_integration_policy", b, comment=comment)
+        imp_sp = (fleet_space_ids(p, sp) or ["default"])[0]
+        ctx.imp(addr, pid if imp_sp == "default" else f"{imp_sp}/{pid}")
+
+
+def fleet_finalize(ctx):
+    """Packages (elasticstack_fleet_integration) waar de integration policies naar verwijzen."""
+    blocks = []
+    for name, info in sorted(ctx.fleet_packages.items()):
+        b = Block(f'resource "elasticstack_fleet_integration" "{info["rn"]}"')
+        b.key = name
+        b.attr("name", name)
+        b.attr("version", info["version"])
+        b.attr("skip_destroy", True)
+        blocks.append((b, info.get("title")))
+        ctx.stats["fleet_integration"][0] += 1
+    if blocks:
+        ctx.blocks["fleet_integrations.tf"] = blocks + ctx.blocks.get("fleet_integrations.tf", [])
+
+
+def fleet_secret_vars(ctx):
+    vars_out = [f'variable "{v}" {{\n  description = {hcl_str(label)}\n  type        = string\n'
+                f'  sensitive   = true\n}}\n' for v, label in ctx.fleet_secrets]
+    tf = ("# Secrets van Fleet integration policies (Fleet exporteert ze niet). De runner vult ze,\n"
+          "# bijv. met CI/CD-variabelen TF_VAR_<naam>. Policies met secrets staan als losse resource\n"
+          "# (sensitive waarden mogen niet in een for_each-map).\n\n" + "\n".join(vars_out))
+    ex = ("# Placeholders voor de Fleet-secrets. Liever als CI/CD-variabelen TF_VAR_<naam> in de runner;\n"
+          "# als .tfvars: hernoemen naar fleet_secrets.auto.tfvars en NIET in git zetten.\n\n"
+          + "\n".join(f"# {label}\n{v} = \"<secret>\"\n" for v, label in ctx.fleet_secrets))
+    return tf, ex, [f"TF_VAR_{v}" for v, _ in ctx.fleet_secrets]
+
+
 # =========================================================================== direct ophalen (--fetch)
 
 DEFAULT_CONFIG_PATHS = ["elastic2tf.ini", os.path.expanduser("~/.config/elastic2tf.ini")]
@@ -1465,7 +1862,9 @@ DEFAULT_CONFIG_PATHS = ["elastic2tf.ini", os.path.expanduser("~/.config/elastic2
 DEFAULT_FETCH_TYPES = ["space", "connector", "datastream", "kibana_data_view", "component_template",
                        "index_template", "ilm", "slm", "ingest_pipeline", "role", "role_mapping",
                        "alerting_rule", "saved_objects"]
-KIBANA_TYPES = {"space", "connector", "kibana_data_view", "alerting_rule", "saved_objects"}
+KIBANA_TYPES = {"space", "connector", "kibana_data_view", "alerting_rule", "saved_objects",
+                "fleet_agent_policy", "fleet_integration_policy"}
+FLEET_TYPES = ["fleet_agent_policy", "fleet_integration_policy"]
 
 
 class FetchError(Exception):
@@ -1591,6 +1990,8 @@ RESOURCE_TYPES = {
     "elasticstack_kibana_data_view": "kibana_data_view",
     "elasticstack_kibana_space": "space",
     "elasticstack_kibana_import_saved_objects": "saved_objects",
+    "elasticstack_fleet_agent_policy": "fleet_agent_policy",
+    "elasticstack_fleet_integration_policy": "fleet_integration_policy",
 }
 HTTP_METHODS = ("GET", "POST", "PUT", "HEAD")
 
@@ -1642,6 +2043,9 @@ def expand_specs(specs):
             calls.append(parse_call(spec))
             continue
         for word in [w for w in re.split(r"[,\s]+", spec) if w]:
+            if word.lower() == "fleet":  # agent policies + integration policies
+                types += [t for t in FLEET_TYPES if t not in types]
+                continue
             t = aliases.get(word.lower())
             if not t:
                 sys.exit(f"Onbekend in --fetch: '{word}'. Gebruik een type (--list-types), een Terraform-"
@@ -1685,6 +2089,8 @@ def fetch_all(args, cp):
     if not specs and item_types and "*" not in item_types:  # alleen type:naam -> alleen die types ophalen
         specs = sorted(item_types)
     types, calls = expand_specs(specs) if specs else (list(DEFAULT_FETCH_TYPES), [])
+    if "fleet_agent_policy" in types and "fleet_integration_policy" not in types:
+        types.append("fleet_integration_policy")  # integraties van de agent policies gaan mee
 
     # types omzetten naar calls; expand=True: data view-lijst per ID verder ophalen
     plan = []  # (method, kibana, pad, body, expand)
@@ -1714,6 +2120,10 @@ def fetch_all(args, cp):
             plan.append(("GET", True, pre + "/api/alerting/rules/_find", None, False))
         if "saved_objects" in types:
             plan.append(("POST", True, pre + "/api/saved_objects/_export", None, False))
+        if "fleet_agent_policy" in types:
+            plan.append(("GET", True, pre + "/api/fleet/agent_policies", None, False))
+        if "fleet_integration_policy" in types:
+            plan.append(("GET", True, pre + "/api/fleet/package_policies", None, False))
     # een lijst-call voor data views wordt ook per ID aangevuld (tijdveld, runtime fields)
     plan += [(m, k, pth, b, k and m == "GET" and pth.split("?")[0].rstrip("/").endswith("/api/data_views"))
              for m, k, pth, b in calls]
@@ -1765,6 +2175,17 @@ def fetch_all(args, cp):
                         break
                     page += 1
                 keep(method, hint_path, {"page": 1, "per_page": len(rules), "total": len(rules), "data": rules})
+            elif kibana and re.search(r"/api/fleet/(agent|package)_policies/?$", path.split("?")[0]):
+                extra = {"format": "simplified"} if "package_policies" in path else {}
+                fitems, page = [], 1
+                while True:   # alle pagina's ophalen
+                    r = api.call(method, with_query(path, perPage=100, page=page, **extra))
+                    fitems += r.get("items") or []
+                    if not r.get("items") or len(fitems) >= (r.get("total") or 0):
+                        break
+                    page += 1
+                keep(method, hint_path, {"items": fitems, "total": len(fitems), "page": 1,
+                                         "perPage": len(fitems)})
             elif kibana and "/api/saved_objects/_export" in path:  # ndjson
                 b = dict(body or {"type": so_types})
                 b.setdefault("includeReferencesDeep", True)
@@ -1811,6 +2232,9 @@ FOR_EACH_LABELS = {
     "elasticstack_kibana_alerting_rule": "alerting_rules",
     "elasticstack_kibana_space": "spaces",
     "elasticstack_kibana_import_saved_objects": "saved_objects",
+    "elasticstack_fleet_agent_policy": "fleet_agent_policies",
+    "elasticstack_fleet_integration_policy": "fleet_integration_policies",
+    "elasticstack_fleet_integration": "fleet_integrations",
 }
 # blocks die meerdere keren mogen voorkomen: in de data altijd een lijst
 REPEATABLE_BLOCKS = {"actions", "indices", "remote_indices", "applications", "alias", "setting"}
@@ -1951,6 +2375,8 @@ def template(parent: Block, schema, datas, var, used=(), hoisted=None):
             soort = spec[1]
             if soort == "json":
                 expr = f"jsonencode({ref})"
+            elif soort == "fleetinputs":
+                expr = FLEET_INPUTS_EXPR.format(ref=ref)
             elif soort == "jsonlist":
                 expr = f"[for v in {ref} : jsonencode(v)]"
             else:
@@ -1979,7 +2405,7 @@ def render_for_each(entries, addr_map):
     for b, comment in entries:
         m = HEADER_RE.match(b.header)
         rtype = m.group(1) if m else None
-        if rtype not in FOR_EACH_LABELS:
+        if rtype not in FOR_EACH_LABELS or getattr(b, "single", False):
             rtype = ("__single__", id(b))
         if rtype not in groups:
             order.append(rtype)
@@ -2047,11 +2473,15 @@ CONVERTERS = {
     "alerting_rule": (conv_alerting_rule, "GET kbn:/api/alerting/rules/_find -> kibana_alerting_rule"),
     "space": (conv_space, "GET kbn:/api/spaces/space -> kibana_space"),
     "saved_objects": (conv_saved_objects, "POST kbn:/api/saved_objects/_export -> kibana_import_saved_objects"),
+    "fleet_agent_policy": (conv_fleet_agent_policy, "GET kbn:/api/fleet/agent_policies -> fleet_agent_policy"),
+    "fleet_integration_policy": (conv_fleet_integration_policy,
+                                 "GET kbn:/api/fleet/package_policies?format=simplified -> fleet_integration_policy "
+                                 "(+ fleet_integration)"),
 }
 # connectors vóór rules, zodat rules naar de connector-resources kunnen verwijzen
 ORDER = ["space", "connector", "datastream", "kibana_data_view", "component_template", "index_template",
          "ilm", "slm", "ingest_pipeline", "role", "role_mapping", "cluster_settings",
-         "alerting_rule", "saved_objects"]
+         "alerting_rule", "saved_objects", "fleet_agent_policy", "fleet_integration_policy"]
 
 PROVIDER_BLOCK = '''terraform {
   required_providers {
@@ -2245,6 +2675,11 @@ def main():
                         "het doel bestaat (rule wordt dan zonder die action aangemaakt)")
     g.add_argument("--no-flapping", action="store_true", help="Voor Kibana < 8.16")
     g.add_argument("--no-artifacts", action="store_true", help="Voor Stack < 9.1")
+
+    g = p.add_argument_group("Fleet")
+    g.add_argument("--no-fleet-integrations", action="store_true",
+                   help="Geen elasticstack_fleet_integration (package-installatie) genereren; "
+                        "integration policies gebruiken dan alleen de package-naam")
     args = p.parse_args()
 
     if args.list_types:
@@ -2321,6 +2756,9 @@ def main():
         for it, space, doc, label in items:
             if it == t:
                 CONVERTERS[t][0](doc, ctx, space)
+    if ctx.fleet_embedded_pp:  # package_policies uit GET agent_policies?full=true
+        conv_fleet_integration_policy({"items": ctx.fleet_embedded_pp}, ctx, None)
+    fleet_finalize(ctx)
 
     # ---- output samenstellen
     header = f"# Gegenereerd door {SCRIPT_NAME} v{__version__} — niet handmatig aanpassen, opnieuw genereren.\n"
@@ -2343,6 +2781,12 @@ def main():
             tf, ex, secret_envs = secret_vars(ctx)
             files["variables.tf"] = header + "\n" + tf
             ctx.extra_files["connector_secrets.tfvars.example"] = header + "\n" + ex
+    fleet_envs = []
+    if ctx.fleet_secrets:
+        tf, ex, fleet_envs = fleet_secret_vars(ctx)
+        files["variables.tf"] = (files["variables.tf"] + "\n" + tf) if "variables.tf" in files \
+            else header + "\n" + tf
+        ctx.extra_files["fleet_secrets.tfvars.example"] = header + "\n" + ex
     if args.with_provider:
         files["provider.tf"] = header + "\n" + PROVIDER_BLOCK
     if ctx.imports:
@@ -2380,7 +2824,7 @@ def main():
 
     # ---- samenvatting
     print(f"\n{SCRIPT_NAME} v{__version__} — geschreven naar {written}:", file=sys.stderr)
-    for t in ORDER + ["datastream_data_view"]:
+    for t in ORDER + ["datastream_data_view", "fleet_integration"]:
         made, skipped = ctx.stats.get(t, [0, 0])
         if made or skipped:
             extra = f" ({skipped} overgeslagen: beheerd/reserved/gefilterd)" if skipped else ""
@@ -2431,6 +2875,13 @@ def main():
             print(f"    {e}", file=sys.stderr)
         if written != "stdout":
             print("    Placeholders: connector_secrets.tfvars.example", file=sys.stderr)
+    if fleet_envs:
+        print(f"\n  FLEET-SECRETS: {len(fleet_envs)} variabele(n), te zetten in de runner (CI/CD-variabelen):",
+              file=sys.stderr)
+        for e in fleet_envs:
+            print(f"    {e}", file=sys.stderr)
+        if written != "stdout":
+            print("    Placeholders: fleet_secrets.tfvars.example", file=sys.stderr)
 
 
 if __name__ == "__main__":
