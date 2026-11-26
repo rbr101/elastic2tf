@@ -4,6 +4,17 @@ Alle noemenswaardige wijzigingen in dit project. Formaat volgens
 [Keep a Changelog](https://keepachangelog.com/nl/1.1.0/), versies volgens
 [Semantic Versioning](https://semver.org/).
 
+## [0.9.1] - 2026-11-26
+
+### Gewijzigd
+- `policy_id` van Fleet agent- en integration policies is nu de naam in kleine letters met `-`
+  in plaats van spaties (`Kafka consumer` → `kafka-consumer`); voorheen het bron-ID. Dubbele
+  ID's krijgen `-2`, `-3`, … De gewijzigde ID's staan in het commentaar en in de samenvatting.
+- Import-blocks alleen voor Fleet policies waarvan het ID gelijk blijft.
+
+### Toegevoegd
+- `--keep-policy-ids`: het bron-ID als `policy_id` houden (oude gedrag).
+
 ## [0.9.0] - 2026-11-26
 
 ### Toegevoegd
