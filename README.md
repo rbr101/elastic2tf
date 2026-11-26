@@ -362,6 +362,7 @@ gerefereerde objecten (data views, visualisaties). Een `export.ndjson` uit
 
 | Optie | Betekenis |
 |-------|-----------|
+| `--keep-policy-ids` | `policy_id` gelijk houden aan het bron-ID (default: naam in kleine letters, spaties → `-`). |
 | `--no-fleet-integrations` | Geen `elasticstack_fleet_integration` (package-installatie) genereren; integration policies gebruiken dan alleen de package-naam. |
 
 Zie verder [Fleet policies](#fleet-policies).
@@ -791,6 +792,11 @@ Gedrag:
   omgezet. Selecteer je met `--items` alleen agent policies, dan vallen integraties van andere
   agent policies weg. Een integratie die aan meerdere agent policies hangt krijgt
   `agent_policy_ids`.
+- **Policy-ID's**: `policy_id` van agent- en integration policies wordt de naam in kleine letters
+  met `-` in plaats van spaties (`Kafka consumer` → `kafka-consumer`, `System Logs 1` →
+  `system-logs-1`). `/` wordt ook `-`; dubbele ID's krijgen `-2`, `-3`, … Het bron-ID staat in het
+  commentaar en de wijzigingen worden na afloop getoond. `--keep-policy-ids` houdt het bron-ID,
+  `--no-keep-ids` laat `policy_id` weg (doel maakt een ID aan).
 - **Verwijzingen**: `agent_policy_id` verwijst naar de agent policy-resource als die in dezelfde
   run zit, anders blijft het bron-ID staan (met een opmerking: die policy moet op het doel
   bestaan). `integration_name` verwijst naar de `elasticstack_fleet_integration`-resource, zodat
@@ -818,7 +824,9 @@ Gedrag:
 - `sys_monitoring` wordt niet gezet: de system-integratie komt (als die bestaat) gewoon als
   integration policy mee.
 - **Imports**: agent policies `<space>/<id>`, integration policies `<id>` (andere space:
-  `<space>/<id>`); geen cluster UUID nodig.
+  `<space>/<id>`); geen cluster UUID nodig. Alleen voor policies waarvan het ID gelijk blijft;
+  wijkt het afgeleide ID af van het bestaande object, dan zou Terraform het toch vervangen.
+  Bestaande policies overnemen: gebruik `--keep-policy-ids --with-imports`.
 - Benodigde rechten: Kibana-privilege **Fleet** en **Integrations** (lezen) in de opgegeven spaces.
 
 ## Bestaande objecten importeren

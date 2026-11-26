@@ -82,7 +82,7 @@ Voorbeelden
   ./elastic2tf.py --list-types
 """
 
-__version__ = "0.9.0"
+__version__ = "0.9.1"
 
 import argparse
 import fnmatch
@@ -448,6 +448,8 @@ class Ctx:
         self.fleet_pp_seen = set()
         self.fleet_packages = {}             # package-naam -> {rn, version, title}
         self.fleet_secrets = []              # [(variabelenaam, omschrijving)]
+        self.fleet_ids = {}                  # "agent"/"integration" -> gebruikte policy_id's
+        self.fleet_id_changed = []           # [(soort, naam, bron-ID, nieuw ID)]
 
     def unique(self, rtype, name, prefix="r"):
         base = tf_name(name, prefix)
@@ -1507,6 +1509,25 @@ def fleet_space_ids(obj, sp):
     return None if sp in (None, "default") else [sp]
 
 
+def fleet_id(ctx, kind, name, src_id):
+    """policy_id: de naam in kleine letters, spaties -> '-' ('Kafka consumer' -> 'kafka-consumer').
+    --keep-policy-ids: het bron-ID. Fleet staat geen '/' of '..' toe; dubbele ID's krijgen -2, -3, ..."""
+    if ctx.args.keep_policy_ids or not name:
+        return src_id
+    base = re.sub(r"\s+", "-", str(name).strip().lower()).replace("/", "-")
+    while ".." in base:
+        base = base.replace("..", ".")
+    base = base[:255] or src_id
+    used = ctx.fleet_ids.setdefault(kind, set())
+    new, i = base, 2
+    while new in used:
+        new, i = f"{base}-{i}", i + 1
+    used.add(new)
+    if new != src_id:
+        ctx.fleet_id_changed.append((kind, name, src_id, new))
+    return new
+
+
 def seconds(v):
     return f"{int(v)}s" if isinstance(v, (int, float)) and not isinstance(v, bool) else v
 
@@ -1580,8 +1601,8 @@ def conv_fleet_agent_policy(doc, ctx, space):
         addr = f"elasticstack_fleet_agent_policy.{rn}"
         ctx.fleet_policy_addr[pid] = f"{addr}.policy_id"
         b = Block(f'resource "elasticstack_fleet_agent_policy" "{rn}"')
-        if not ctx.args.no_keep_ids:
-            b.attr("policy_id", pid)
+        new_id = None if ctx.args.no_keep_ids else fleet_id(ctx, "agent", name, pid)
+        b.attr("policy_id", new_id)
         b.attr("name", name)
         b.attr("namespace", p.get("namespace") or "default")
         b.attr("description", p.get("description") or None)
@@ -1630,8 +1651,11 @@ def conv_fleet_agent_policy(doc, ctx, space):
                             "download_source_id") if p.get(k)]
         if outs:
             comment += f" — {', '.join(outs)} moeten op het doel bestaan"
+        if new_id and new_id != pid:
+            comment += f" — bron-ID '{pid}'"
         ctx.add("fleet_agent_policies.tf", "fleet_agent_policy", b, comment=comment)
-        ctx.imp(addr, f"{(fleet_space_ids(p, sp) or ['default'])[0]}/{pid}")
+        if new_id in (None, pid):
+            ctx.imp(addr, f"{(fleet_space_ids(p, sp) or ['default'])[0]}/{pid}")
 
 
 def legacy_vars(v):
@@ -1787,8 +1811,8 @@ def conv_fleet_integration_policy(doc, ctx, space):
             pvars[k] = on_secret(k) if isinstance(v, dict) and v.get("isSecretRef") else v
 
         b = Block(f'resource "elasticstack_fleet_integration_policy" "{rn}"')
-        if not ctx.args.no_keep_ids:
-            b.attr("policy_id", pid)
+        new_id = None if ctx.args.no_keep_ids else fleet_id(ctx, "integration", name, pid)
+        b.attr("policy_id", new_id)
         b.attr("name", name)
         b.attr("namespace", p.get("namespace") or "default")
         b.attr("description", p.get("description") or None)
@@ -1823,9 +1847,12 @@ def conv_fleet_integration_policy(doc, ctx, space):
                         f"en moet op het doel bestaan")
         if secrets:
             comment += f" — secrets via {', '.join('var.' + s for s in secrets)}"
+        if new_id and new_id != pid:
+            comment += f" — bron-ID '{pid}'"
         ctx.add("fleet_integration_policies.tf", "fleet_integration_policy", b, comment=comment)
         imp_sp = (fleet_space_ids(p, sp) or ["default"])[0]
-        ctx.imp(addr, pid if imp_sp == "default" else f"{imp_sp}/{pid}")
+        if new_id in (None, pid):
+            ctx.imp(addr, pid if imp_sp == "default" else f"{imp_sp}/{pid}")
 
 
 def fleet_finalize(ctx):
@@ -2677,6 +2704,9 @@ def main():
     g.add_argument("--no-artifacts", action="store_true", help="Voor Stack < 9.1")
 
     g = p.add_argument_group("Fleet")
+    g.add_argument("--keep-policy-ids", action="store_true",
+                   help="policy_id van agent- en integration policies gelijk aan de bron houden "
+                        "(default: naam in kleine letters met '-' i.p.v. spaties)")
     g.add_argument("--no-fleet-integrations", action="store_true",
                    help="Geen elasticstack_fleet_integration (package-installatie) genereren; "
                         "integration policies gebruiken dan alleen de package-naam")
@@ -2875,6 +2905,14 @@ def main():
             print(f"    {e}", file=sys.stderr)
         if written != "stdout":
             print("    Placeholders: connector_secrets.tfvars.example", file=sys.stderr)
+    if ctx.fleet_id_changed:
+        print(f"\n  FLEET POLICY-ID'S: {len(ctx.fleet_id_changed)} policy_id('s) afgeleid van de naam "
+              f"(--keep-policy-ids houdt het bron-ID):", file=sys.stderr)
+        for kind, name, old, new in ctx.fleet_id_changed:
+            print(f"    - {kind}: {name}: {old} -> {new}", file=sys.stderr)
+        if args.with_imports:
+            print("    Voor deze policies zijn geen import-blocks gemaakt: het ID verschilt van het bestaande "
+                  "object, Terraform zou het toch vervangen.", file=sys.stderr)
     if fleet_envs:
         print(f"\n  FLEET-SECRETS: {len(fleet_envs)} variabele(n), te zetten in de runner (CI/CD-variabelen):",
               file=sys.stderr)
